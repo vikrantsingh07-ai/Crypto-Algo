@@ -1,0 +1,32 @@
+{
+  "name": "crypto-algo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Demo-first ETH perpetual scalping bot for Delta Exchange with a Vercel dashboard and an always-on worker.",
+  "license": "UNLICENSED",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm run build -w @cryptoalgo/server && npm run build -w @cryptoalgo/web",
+    "dev:server": "npm run dev -w @cryptoalgo/server",
+    "dev:web": "npm run dev -w @cryptoalgo/web",
+    "start:server": "npm run start -w @cryptoalgo/server",
+    "db:migrate": "npm run db:migrate -w @cryptoalgo/server",
+    "hash-password": "npm run hash-password -w @cryptoalgo/server --silent --",
+    "backtest": "npm run backtest -w @cryptoalgo/server --"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "vitest": "~3.2.4"
+  }
+}
