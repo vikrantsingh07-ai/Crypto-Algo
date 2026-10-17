@@ -1,0 +1,37 @@
+# Render Blueprint: always-on backend + managed Postgres. Render gives each region a small fixed set of
+# outbound IPs (Dashboard → your service → Connect → Outbound) — whitelist those on your Delta API key.
+# Choose the region closest to AWS Tokyo (Singapore).
+services:
+  - type: web
+    name: cryptoalgo-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter            # must be a paid always-on plan: free instances sleep and would stop the bot
+    region: singapore
+    healthCheckPath: /api/health
+    numInstances: 1          # never scale out: one worker per account
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cryptoalgo-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false          # openssl rand -base64 32
+      - key: ADMIN_PASSWORD_HASH
+        sync: false          # npm run hash-password -- "your passphrase"
+      - key: PROXY_SHARED_SECRET
+        sync: false          # same value as on Vercel
+      - key: DELTA_ENV
+        value: production    # or testnet
+      - key: DELTA_API_KEY
+        sync: false          # optional: or add the key from the dashboard (stored encrypted)
+      - key: DELTA_API_SECRET
+        sync: false
+databases:
+  - name: cryptoalgo-db
+    plan: basic-256mb
+    region: singapore

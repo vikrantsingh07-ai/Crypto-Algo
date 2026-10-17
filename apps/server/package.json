@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "db:migrate": "tsx src/cli/migrate.ts",
     "hash-password": "tsx src/cli/hash-password.ts",
-    "backtest": "tsx src/cli/backtest.ts"
+    "backtest": "tsx src/cli/backtest.ts",
+    "dev:mock": "tsx src/cli/dev-mock.ts"
   },
   "dependencies": {
     "@cryptoalgo/core": "*",

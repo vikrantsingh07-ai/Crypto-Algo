@@ -1,0 +1,33 @@
+# Fly.io: always-on single machine in Tokyo (closest to Delta's AWS Tokyo data centre).
+#   fly launch --no-deploy --copy-config
+#   fly secrets set SESSION_SECRET=... CREDENTIAL_ENCRYPTION_KEY=... ADMIN_PASSWORD_HASH=... PROXY_SHARED_SECRET=... DATABASE_URL=...
+#   fly ips allocate-egress --region nrt     # static outbound IPv4 → whitelist it on your Delta API key
+#   fly deploy
+app = 'cryptoalgo-server'
+primary_region = 'nrt'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  NODE_ENV = 'production'
+  DELTA_ENV = 'production'
+  PORT = '8080'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'   # the bot must never be put to sleep
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = '20s'
+    interval = '30s'
+    method = 'GET'
+    path = '/api/health'
+    timeout = '5s'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'

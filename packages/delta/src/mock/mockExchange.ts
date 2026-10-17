@@ -96,6 +96,8 @@ export class MockDeltaExchange {
   position = { size: 0, entry: 0 };
   balance: number;
   realizedPnl = 0;
+  /** Cumulative realised funding shown on the position (signed cashflow, negative = paid). */
+  realizedFunding = 0;
   leverage = 10;
   candles: { time: number; open: number; high: number; low: number; close: number; volume: number }[] = [];
   requestLog: { method: string; path: string; query: string; body: string; authed: boolean; status: number }[] = [];
@@ -398,7 +400,7 @@ export class MockDeltaExchange {
       bankruptcy_price: null,
       mark_price: String(this.mark),
       realized_pnl: String(this.realizedPnl),
-      realized_funding: '0',
+      realized_funding: String(this.realizedFunding),
       commission: '0',
       updated_at: new Date(this.nowFn()).toISOString(),
     };
@@ -582,6 +584,7 @@ export class MockDeltaExchange {
     };
     this.fills.push(fill);
     this.notifyPrivate('user_trades', fill);
+    this.notifyPrivate('v2/user_trades', { type: 'v2/user_trades', ...fill });
     this.notifyPrivate('positions', { type: 'positions', action: this.position.size === 0 ? 'delete' : 'update', symbol: o.symbol, product_id: o.productId, size: this.position.size, entry_price: String(this.position.entry) });
     this.notifyPrivate('margins', { type: 'margins', ...this.walletJson()[0] });
 

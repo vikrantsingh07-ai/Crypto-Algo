@@ -1,8 +1,9 @@
 import path from 'node:path';
-import { loadConfig } from '../config';
+import { loadConfig, loadDotEnv } from '../config';
 import { createDb, migrate } from '../db/db';
 
 /** `npm run db:migrate` — applies pending SQL migrations to DATABASE_URL (or the embedded dev database). */
+loadDotEnv();
 const cfg = loadConfig();
 const db = await createDb({ url: cfg.DATABASE_URL, ssl: cfg.DATABASE_SSL, dataDir: path.join(cfg.DATA_DIR, 'pglite') });
 const ran = await migrate(db);

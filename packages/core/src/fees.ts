@@ -7,7 +7,8 @@ import { round } from './math';
  *
  *   commission = notional * rate           (notional = contracts * contractValue * price)
  *   gst        = commission * gstRate       (Indian platforms levy GST on trading fees)
- *   total fee  = commission + gst
+ *   tax        = notional * otherTaxRate  (0 unless configured)
+ *   total fee  = commission + gst + tax
  *
  * `rate` is the product's `maker_commission_rate` / `taker_commission_rate` published by the
  * exchange (read from `GET /v2/products/{symbol}`); Settings may override it. The actual
@@ -20,6 +21,7 @@ export interface FeeConfig {
   makerRate: number;
   takerRate: number;
   gstRate: number;
+  otherTaxRate: number;
   waiver: { enabled: boolean; withinMinutes: number };
   usdInrRate: number;
 }
@@ -29,6 +31,7 @@ export function feeConfigFrom(settings: Settings, spec: ContractSpec): FeeConfig
     makerRate: settings.execution.makerFeeRate ?? spec.makerFeeRate,
     takerRate: settings.execution.takerFeeRate ?? spec.takerFeeRate,
     gstRate: settings.execution.gstRate,
+    otherTaxRate: settings.execution.otherTaxRate ?? 0,
     waiver: { ...settings.execution.exitFeeWaiver },
     usdInrRate: settings.execution.usdInrRate,
   };
@@ -58,11 +61,13 @@ export function calcFee(input: FeeInput, cfg: FeeConfig): FeeBreakdown {
     input.holdMs <= cfg.waiver.withinMinutes * 60_000;
   const commission = waived ? 0 : notional * rate;
   const gst = commission * cfg.gstRate;
+  const tax = waived ? 0 : notional * (cfg.otherTaxRate ?? 0);
   return {
     notional: round(notional, 8),
     commission: round(commission, 8),
     gst: round(gst, 8),
-    total: round(commission + gst, 8),
+    tax: round(tax, 8),
+    total: round(commission + gst + tax, 8),
     rate,
     role: input.role,
     waived,
@@ -179,7 +184,7 @@ export function estimateEconomics(i: EconomicsInput, cfg: FeeConfig): TradeEcono
   const riskNet = riskGross + feeIfStop;
 
   // Break-even move m solving  m*qty = entryFee + exitRate' * qty * (p + dir*m), exitRate' = rate*(1+gst)
-  const exitRate = (targetRole === 'maker' ? cfg.makerRate : cfg.takerRate) * (1 + cfg.gstRate);
+  const exitRate = (targetRole === 'maker' ? cfg.makerRate : cfg.takerRate) * (1 + cfg.gstRate) + (cfg.otherTaxRate ?? 0);
   const breakevenMoveUsd = (entryFee + exitRate * qty * i.entryPrice) / (qty * (1 - dir * exitRate));
 
   return {

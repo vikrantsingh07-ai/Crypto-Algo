@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { z } from 'zod';
 import type { DeltaEnvName } from '@cryptoalgo/delta';
 
@@ -38,6 +39,10 @@ const EnvSchema = z.object({
   DELTA_REST_URL: z.string().optional(),
   DELTA_WS_PUBLIC_URL: z.string().optional(),
   DELTA_WS_PRIVATE_URL: z.string().optional(),
+  /** Override the human label shown in the UI (e.g. for a local mock exchange). */
+  DELTA_LABEL: z.string().max(120).optional(),
+  /** Override whether the endpoint is real money. Only meaningful with DELTA_ENV=custom. */
+  DELTA_REAL_MONEY: bool(true),
   DELTA_API_KEY: z.string().optional(),
   DELTA_API_SECRET: z.string().optional(),
   SYMBOL: z.string().regex(/^ETH[A-Z]{3,4}$/).default('ETHUSD'),
@@ -63,8 +68,22 @@ export interface AppConfig extends Omit<Env, 'DELTA_ENV'> {
   warnings: string[];
 }
 
+/** Loads a local `.env` for development (never overrides variables that are already set). */
+export function loadDotEnv(): void {
+  if (process.env.NODE_ENV === 'production') return;
+  for (const f of ['.env', '../../.env']) {
+    try {
+      if (fs.existsSync(f)) (process as unknown as { loadEnvFile: (p: string) => void }).loadEnvFile(f);
+    } catch {
+      /* unreadable .env: ignore, the normal validation will report what is missing */
+    }
+  }
+}
+
 export function loadConfig(source: Record<string, string | undefined> = process.env): AppConfig {
-  const parsed = EnvSchema.safeParse(source);
+  // Empty values (as in .env.example) mean "not set".
+  const cleaned = Object.fromEntries(Object.entries(source).filter(([, v]) => v !== undefined && v !== ''));
+  const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {
     const msg = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new Error(`Invalid environment configuration: ${msg}`);

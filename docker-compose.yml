@@ -1,0 +1,36 @@
+# Self-hosting on a VPS (recommended: a small server in Tokyo/Singapore with a STATIC public IP,
+# because Delta requires IP whitelisting for API keys with trading permission).
+#   cp .env.example .env   # fill in the values
+#   docker compose up -d --build
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cryptoalgo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: cryptoalgo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cryptoalgo']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cryptoalgo:${POSTGRES_PASSWORD}@db:5432/cryptoalgo
+      DATABASE_SSL: disable
+      NODE_ENV: production
+    ports:
+      - '8080:8080' # put a TLS reverse proxy (Caddy/nginx) in front; do not expose plain HTTP publicly
+
+volumes:
+  pgdata:

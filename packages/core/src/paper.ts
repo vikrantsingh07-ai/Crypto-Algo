@@ -175,7 +175,7 @@ export interface StepResult {
 /** Breakeven stop price that covers entry+exit taker/maker fees on the current position. */
 export function breakevenStopPrice(pos: OpenPosition, ctx: PaperContext): number {
   const dir = pos.side === 'long' ? 1 : -1;
-  const exitRate = ctx.fees.takerRate * (1 + ctx.fees.gstRate);
+  const exitRate = ctx.fees.takerRate * (1 + ctx.fees.gstRate) + (ctx.fees.otherTaxRate ?? 0);
   const qty = pos.qtyEth;
   const move = (pos.entryFee.total + exitRate * qty * pos.entryPrice) / (qty * (1 - dir * exitRate));
   return roundToTick(pos.entryPrice + dir * move, ctx.spec.tickSize, pos.side === 'long' ? 'up' : 'down');

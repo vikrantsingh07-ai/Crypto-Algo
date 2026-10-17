@@ -68,6 +68,7 @@ export interface EnvOverrides {
   wsPublicUrl?: string;
   wsPrivateUrl?: string;
   realMoney?: boolean;
+  label?: string;
 }
 
 export function resolveEndpoints(env: DeltaEnvName, overrides: EnvOverrides = {}): DeltaEndpoints {
@@ -78,7 +79,7 @@ export function resolveEndpoints(env: DeltaEnvName, overrides: EnvOverrides = {}
       restUrl: overrides.restUrl.replace(/\/$/, ''),
       wsPublicUrl: overrides.wsPublicUrl ?? '',
       wsPrivateUrl: overrides.wsPrivateUrl ?? overrides.wsPublicUrl ?? '',
-      label: `Custom endpoint (${overrides.restUrl})`,
+      label: overrides.label ?? `Custom endpoint (${overrides.restUrl})`,
       realMoney: overrides.realMoney ?? true,
     };
   }
@@ -89,6 +90,7 @@ export function resolveEndpoints(env: DeltaEnvName, overrides: EnvOverrides = {}
     restUrl: (overrides.restUrl ?? base.restUrl).replace(/\/$/, ''),
     wsPublicUrl: overrides.wsPublicUrl ?? base.wsPublicUrl,
     wsPrivateUrl: overrides.wsPrivateUrl ?? base.wsPrivateUrl,
+    label: overrides.label ?? base.label,
     realMoney: overrides.realMoney ?? base.realMoney,
   };
 }

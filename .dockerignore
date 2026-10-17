@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+.git
+.next
+**/.next
+**/dist
+data
+.env
+.env.*
+!.env.example
+docs
+*.md
+apps/web/*
+!apps/web/package.json

@@ -21,7 +21,8 @@
     "start:server": "npm run start -w @cryptoalgo/server",
     "db:migrate": "npm run db:migrate -w @cryptoalgo/server",
     "hash-password": "npm run hash-password -w @cryptoalgo/server --silent --",
-    "backtest": "npm run backtest -w @cryptoalgo/server --"
+    "backtest": "npm run backtest -w @cryptoalgo/server --",
+    "dev:mock": "npm run dev:mock -w @cryptoalgo/server"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

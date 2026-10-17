@@ -227,6 +227,7 @@ export class LiveExecutor {
       if (equityUsd !== null) {
         this.baselineEquityUsd ??= equityUsd;
         this.peakEquityUsd = Math.max(this.peakEquityUsd ?? equityUsd, equityUsd);
+        await this.persistBaseline();
       }
     } catch (e) {
       this.account = { ...this.account, error: explainDeltaError(e) };
@@ -234,8 +235,25 @@ export class LiveExecutor {
     return this.account;
   }
 
+  private lastBaselinePersist: { baseline: number | null; peak: number | null } = { baseline: null, peak: null };
+
+  /** The drawdown reference must survive restarts, otherwise a restart would silently clear a drawdown halt. */
+  private async persistBaseline(force = false): Promise<void> {
+    const cur = { baseline: this.baselineEquityUsd, peak: this.peakEquityUsd };
+    const prev = this.lastBaselinePersist;
+    if (!force && prev.baseline === cur.baseline && prev.peak !== null && cur.peak !== null && Math.abs(prev.peak - cur.peak) < 0.01) return;
+    this.lastBaselinePersist = cur;
+    await this.d.repos.setDoc('live_baseline', { ...cur, updatedAt: this.d.now() });
+  }
+
   async loadHistory(): Promise<void> {
     const now = this.d.now();
+    const saved = await this.d.repos.getDoc<{ baseline: number | null; peak: number | null }>('live_baseline');
+    if (saved) {
+      this.baselineEquityUsd = saved.baseline;
+      this.peakEquityUsd = saved.peak;
+      this.lastBaselinePersist = { baseline: saved.baseline, peak: saved.peak };
+    }
     const closed = await this.d.repos.closedTrades('live', 0);
     this.consecutiveLosses = 0;
     this.lastLossTs = null;
@@ -249,9 +267,10 @@ export class LiveExecutor {
   }
 
   /** Reset the live drawdown baseline (operator action, audited by the caller). */
-  resetBaseline() {
+  async resetBaseline(): Promise<void> {
     this.baselineEquityUsd = this.account.equityUsd;
     this.peakEquityUsd = this.account.equityUsd;
+    await this.persistBaseline(true);
   }
 
   /**
@@ -310,13 +329,13 @@ export class LiveExecutor {
     // adopt / refresh in-memory position
     const live = await this.rebuildPosition(dbTrade, pos, acct.openOrders);
     this.position = live;
-    live.lastRealizedFunding = pos.realizedFunding;
     if (Math.abs(pos.size) !== live.contracts) {
       this.d.logger.warn('live position size differs from record; adopting exchange size', { recorded: live.contracts, exchange: Math.abs(pos.size) });
       live.contracts = Math.abs(pos.size);
       live.qtyEth = live.contracts * live.contractValue;
     }
     await this.ensureProtection(live, acct.openOrders);
+    if (live.fundingAccrued !== 0) await this.persistOpen(live);
     this.reconciled = true;
     this.reconcileReason = null;
     this.lastReconcileAt = this.d.now();
@@ -352,7 +371,7 @@ export class LiveExecutor {
       entrySlippageCost: Number(meta.entrySlippageCost ?? 0),
       marginUsed: pos.margin,
       liquidationPrice: pos.liquidationPrice ?? estimateLiquidationPrice(t.side, entryPrice, t.leverage, spec.maintenanceMarginPct),
-      fundingAccrued: existing?.fundingAccrued ?? 0,
+      fundingAccrued: pos.realizedFunding - Number(meta.fundingBase ?? existing?.lastRealizedFunding ?? pos.realizedFunding),
       mfe: existing?.mfe ?? Number(meta.mfe ?? 0),
       mae: existing?.mae ?? Number(meta.mae ?? 0),
       reachedTargetAtMs: existing?.reachedTargetAtMs ?? (meta.reachedTargetAtMs ? Number(meta.reachedTargetAtMs) : null),
@@ -369,7 +388,7 @@ export class LiveExecutor {
       entryOrderId: existing?.entryOrderId ?? (meta.entryOrderId ? Number(meta.entryOrderId) : null),
       stopGeneration: existing?.stopGeneration ?? Number(meta.stopGeneration ?? 1),
       closing: existing?.closing ?? false,
-      lastRealizedFunding: existing?.lastRealizedFunding ?? pos.realizedFunding,
+      lastRealizedFunding: Number(meta.fundingBase ?? existing?.lastRealizedFunding ?? pos.realizedFunding),
     };
   }
 
@@ -700,7 +719,7 @@ export class LiveExecutor {
     await this.d.repos.saveOpenPositionRow(p, 'open', {
       entryRefPrice: p.entryRefPrice, entryFeeActual: p.entryFee.total, entrySlippageCost: p.entrySlippageCost, targetMoveUsd: p.targetMoveUsd, stopMoveUsd: p.stopMoveUsd,
       signalCandleTime: p.signalCandleTime, entryOrderId: p.entryOrderId, stopOrderId: p.stopOrderId, targetOrderId: p.targetOrderId, stopGeneration: p.stopGeneration,
-      breakevenArmed: p.breakevenArmed, mfe: p.mfe, mae: p.mae, reachedTargetAtMs: p.reachedTargetAtMs, fundingEstimate: p.fundingAccrued,
+      breakevenArmed: p.breakevenArmed, mfe: p.mfe, mae: p.mae, reachedTargetAtMs: p.reachedTargetAtMs, fundingEstimate: p.fundingAccrued, fundingBase: p.lastRealizedFunding,
     });
   }
 

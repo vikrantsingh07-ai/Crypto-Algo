@@ -118,6 +118,12 @@ export const SettingsSchema = z.object({
       /** GST on trading fees for Indian platforms. Verify against your account's fee statement. */
       gstRate: num(0.18, 0, 1),
       /**
+       * Any additional transaction tax charged on each leg's notional (e.g. a TDS-style levy), as a fraction.
+       * 0 by default: Delta's published fee schedule does not state one for perpetuals; enter your own figure if your
+       * statements show it.
+       */
+      otherTaxRate: z.number().min(0).max(0.05).default(0),
+      /**
        * Optional exit-fee waiver. DISABLED by default: no official source verified that exiting
        * inside 30 minutes is free, so it is never assumed. Enable only if your fee statement shows it.
        */

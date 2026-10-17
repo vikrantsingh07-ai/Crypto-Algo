@@ -78,7 +78,14 @@ export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): 
 
   const endpoints =
     ov.endpoints ??
-    resolveEndpoints(cfg.DELTA_ENV, { restUrl: cfg.DELTA_REST_URL, wsPublicUrl: cfg.DELTA_WS_PUBLIC_URL, wsPrivateUrl: cfg.DELTA_WS_PRIVATE_URL });
+    resolveEndpoints(cfg.DELTA_ENV, {
+      restUrl: cfg.DELTA_REST_URL,
+      wsPublicUrl: cfg.DELTA_WS_PUBLIC_URL,
+      wsPrivateUrl: cfg.DELTA_WS_PRIVATE_URL,
+      label: cfg.DELTA_LABEL,
+      // only a custom endpoint may be declared non-real-money; the official hosts keep their built-in classification
+      realMoney: cfg.DELTA_ENV === 'custom' ? cfg.DELTA_REAL_MONEY : undefined,
+    });
 
   const creds = new CredentialStore(repos, cfg, endpoints.env);
   await creds.refresh();

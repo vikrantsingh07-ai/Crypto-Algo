@@ -296,6 +296,71 @@ describe('armed live execution', () => {
   });
 });
 
+describe('drawdown limit survives restarts', () => {
+  it('a restart does not silently clear the live drawdown reference', async () => {
+    await arm(h);
+    await h.rt.updateSettings({ limits: { maxDrawdownPct: 15 } }, 'a', 'admin');
+    await h.rt.live.reconcile(); // records baseline = peak = 1000
+    expect(h.rt.live.peakEquityUsd).toBeCloseTo(1000, 2);
+    h.ex.balance = 700; // equity fell 30% (limit is 15%)
+    const h2 = await h.restart();
+    h = h2;
+    await h2.rt.live.reconcile();
+    expect(h2.rt.live.peakEquityUsd).toBeCloseTo(1000, 2); // peak remembered
+    const res = await h2.rt.live.tryEnter(signalAt(1_700_000_300_000), h2.feed.getQuote()!);
+    expect(res.allowed).toBe(false);
+    expect(res.reasons.join(' ')).toMatch(/MAX_DRAWDOWN/);
+    // explicit operator reset re-bases it and persists
+    await arm(h2);
+    await h2.rt.live.resetBaseline();
+    const h3 = await h2.restart();
+    h = h3;
+    await h3.rt.live.loadHistory();
+    expect(h3.rt.live.peakEquityUsd).toBeCloseTo(700, 2);
+  });
+});
+
+describe('private stream and live funding', () => {
+  it('account events on the authenticated websocket trigger a reconciliation (REST stays the source of truth)', async () => {
+    const { PrivateStream } = await import('../src/services/privateStream');
+    let events = 0;
+    const ps = new PrivateStream({ endpoints: h.rt.endpoints, creds: h.rt.creds, symbol: () => 'ETHUSD', onEvent: () => events++, logger: h.rt.logger, now: () => Date.now(), minIntervalMs: 50 });
+    ps.start();
+    for (let i = 0; i < 100 && ps.status().state !== 'ready'; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(ps.status().state).toBe('ready');
+    await h.rt.client.placeOrder({ product_id: 3136, side: 'buy', size: 2, order_type: 'market_order', client_order_id: 'ps-1' });
+    for (let i = 0; i < 100 && events === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(events).toBeGreaterThan(0);
+    expect(ps.status().lastEventAt).not.toBeNull();
+    ps.stop();
+    expect(ps.status().enabled).toBe(false);
+  });
+
+  it('does not connect without credentials', async () => {
+    const h2 = await makeHarness({ withCredentials: false, ex: undefined });
+    try {
+      const { PrivateStream } = await import('../src/services/privateStream');
+      const ps = new PrivateStream({ endpoints: h2.rt.endpoints, creds: h2.rt.creds, symbol: () => 'ETHUSD', onEvent: () => {}, logger: h2.rt.logger, now: () => Date.now() });
+      ps.start();
+      expect(ps.status().enabled).toBe(false);
+    } finally {
+      await h2.stop();
+    }
+  });
+
+  it('records realised funding paid while a live position is open into the final trade', async () => {
+    await arm(h);
+    await enter();
+    h.ex.realizedFunding = -0.0123; // funding paid while holding
+    await h.rt.live.reconcile();
+    expect(h.rt.live.position!.fundingAccrued).toBeCloseTo(-0.0123, 6);
+    await h.rt.live.closeNow('manual');
+    const t = (await h.rt.repos.listTrades('live'))[0];
+    expect(t.funding).toBeCloseTo(-0.0123, 6);
+    expect(t.netPnl).toBeCloseTo(t.grossPnl! - t.fees! + t.funding!, 6);
+  });
+});
+
 describe('restart & recovery', () => {
   it('worker restart adopts the open real position and its protective orders; no duplicate entry', async () => {
     await arm(h);

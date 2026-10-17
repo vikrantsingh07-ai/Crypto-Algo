@@ -27,6 +27,18 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
   const base = Fastify({ logger: false, trustProxy: true, bodyLimit: 64 * 1024, disableRequestLogging: true });
   const app = Object.assign(base, { auth }) as unknown as FastifyInstance & { auth: AuthService };
 
+  // Tolerate an empty body with a JSON content-type (several action endpoints take no payload).
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    const text = typeof body === 'string' ? body : body.toString('utf8');
+    if (!text.trim()) return done(null, {});
+    try {
+      done(null, JSON.parse(text));
+    } catch (e) {
+      (e as { statusCode?: number }).statusCode = 400;
+      done(e as Error, undefined);
+    }
+  });
+
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(rateLimit, { global: true, max: 600, timeWindow: '1 minute', allowList: [] });
 
@@ -223,7 +235,7 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
 
   app.post('/api/live/reset-baseline', admin, async (req) => {
     const w = who(req);
-    rt.live.resetBaseline();
+    await rt.live.resetBaseline();
     await rt.repos.audit({ ...w, action: 'live_drawdown_baseline_reset', details: { equity: rt.live.baselineEquityUsd } });
     return { ok: true, baselineEquityUsd: rt.live.baselineEquityUsd };
   });
@@ -271,6 +283,7 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
     if (st.liveArmed || st.mode === 'live') {
       await rt.bot.save({ ...st, liveArmed: false, mode: 'demo', attention: [...st.attention, 'API credentials replaced; Live trading disarmed'] });
     }
+    rt.bot.onCredentialsChanged();
     await rt.repos.audit({ ...w, action: 'credentials_updated', details: { fingerprint: rt.creds.fingerprint(), env: rt.endpoints.env } });
     return rt.creds.status();
   });
@@ -284,6 +297,7 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
     }
     const st = await rt.bot.reload();
     if (st.liveArmed || st.mode === 'live') await rt.bot.save({ ...st, liveArmed: false, mode: 'demo' });
+    rt.bot.onCredentialsChanged();
     await rt.repos.audit({ ...w, action: 'credentials_deleted', details: { env: rt.endpoints.env } });
     return rt.creds.status();
   });

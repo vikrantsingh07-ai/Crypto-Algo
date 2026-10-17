@@ -1,4 +1,4 @@
-import { evaluateLatest, riskSummary, type ContractSpec, type Evaluation, type Quote, type Settings } from '@cryptoalgo/core';
+import { breakevenWinRate, estimateEconomics, evaluateLatest, feeConfigFrom, quantityToContracts, riskSummary, type ContractSpec, type Evaluation, type Quote, type Settings } from '@cryptoalgo/core';
 import type { DeltaEndpoints, DeltaHttp, Logger, MarketFeed } from '@cryptoalgo/delta';
 import type { AppConfig } from '../config';
 import { randomId } from '../crypto';
@@ -6,6 +6,7 @@ import type { BotState, Repos } from '../repos';
 import type { CredentialStore } from './credentials';
 import type { DemoEngine } from './demoEngine';
 import type { LiveExecutor } from './liveExecutor';
+import { PrivateStream } from './privateStream';
 
 export interface BotDeps {
   cfg: AppConfig;
@@ -49,8 +50,23 @@ export class Bot {
   private candleHandler = () => void this.onCandle().catch((e) => this.d.logger.error('candle handler failed', { error: (e as Error).message }));
   private lastSpecRefresh = 0;
   private lastError: string | null = null;
+  readonly privateStream: PrivateStream;
 
-  constructor(private readonly d: BotDeps) {}
+  constructor(private readonly d: BotDeps) {
+    this.privateStream = new PrivateStream({
+      endpoints: d.endpoints,
+      creds: d.creds,
+      symbol: () => d.getSettings().instrument.symbol,
+      now: () => this.now(),
+      logger: d.logger,
+      onEvent: () => void d.live.reconcile().catch((e) => d.logger.warn('event-triggered reconcile failed', { error: (e as Error).message })),
+    });
+  }
+
+  /** Called when API credentials are added / replaced / removed. */
+  onCredentialsChanged(): void {
+    if (this.workerActive) this.privateStream.start();
+  }
 
   private now() {
     return this.d.now();
@@ -110,6 +126,7 @@ export class Bot {
       await d.repos.audit({ actor: 'system', action: 'live_disarmed', details: { reason: 'credentials changed' } });
     }
     if (d.creds.status().configured) await d.live.reconcile().catch((e) => d.logger.warn('initial reconcile failed', { error: (e as Error).message }));
+    this.privateStream.start();
     await d.feed.start();
     d.feed.on('quote', this.quoteHandler);
     d.feed.on('candleClosed', this.candleHandler);
@@ -126,6 +143,7 @@ export class Bot {
     this.d.feed.off('quote', this.quoteHandler);
     this.d.feed.off('candleClosed', this.candleHandler);
     this.d.feed.stop();
+    this.privateStream.stop();
     if (this.workerActive) await this.d.repos.releaseLease(this.instanceId).catch(() => {});
     this.workerActive = false;
   }
@@ -305,6 +323,33 @@ export class Bot {
   }
 
   // ------------------------------------------------------------------ dashboard snapshot
+  /** "Fee reality check": what each target size is worth after maker/taker fees + GST at the current price. */
+  private economics(settings: Settings, spec: ContractSpec, quote: Quote | null) {
+    const contracts = quantityToContracts(settings.position.quantityEth, spec.contractValue);
+    if (!contracts || !quote) return null;
+    const px = quote.last;
+    const fees = feeConfigFrom(settings, spec);
+    const t = settings.targets;
+    const stop = (t.stopLossMinUsd + t.stopLossMaxUsd) / 2;
+    const moves = [t.targetMoveMinUsd, (t.targetMoveMinUsd + t.targetMoveMaxUsd) / 2, t.targetMoveMaxUsd];
+    const row = (move: number, targetRole: 'maker' | 'taker') => {
+      const e = estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + move, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole, stopSlippageUsd: settings.execution.simStopSlippageUsd }, fees);
+      return { moveUsd: move, grossReward: e.rewardGross, fees: e.feeIfTarget, netReward: e.rewardNet, netRewardRisk: e.netRewardRisk, requiredWinRate: breakevenWinRate(e.rewardNet, e.riskNet) };
+    };
+    const be = (role: 'maker' | 'taker') => estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + 5, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole: role }, fees).breakevenMoveUsd;
+    return {
+      referencePrice: px,
+      contracts,
+      stopUsd: stop,
+      makerTarget: moves.map((m) => row(m, 'maker')),
+      takerTarget: moves.map((m) => row(m, 'taker')),
+      breakevenMoveMakerExitUsd: be('maker'),
+      breakevenMoveTakerExitUsd: be('taker'),
+      rates: { maker: fees.makerRate, taker: fees.takerRate, gst: fees.gstRate },
+      verifiedSpec: spec.verified,
+    };
+  }
+
   snapshot() {
     const d = this.d;
     const settings = d.getSettings();
@@ -350,7 +395,10 @@ export class Bot {
         clockOffsetMs: d.http.clockOffset,
         apiLastSuccessAt: d.http.lastSuccessAt,
         apiLastError: d.http.lastError,
+        privateStream: this.privateStream.status(),
       },
+      economics: this.economics(settings, spec, quote),
+      spark: [...d.feed.getClosedCandles().slice(-90).map((c) => [c.t, c.c]), ...(d.feed.getFormingCandle() ? [[d.feed.getFormingCandle()!.t, d.feed.getFormingCandle()!.c]] : [])],
       settings,
     };
   }

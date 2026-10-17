@@ -1,6 +1,6 @@
 import { buildApi } from './api';
 import { AuthService } from './auth';
-import { loadConfig } from './config';
+import { loadConfig, loadDotEnv } from './config';
 import { createLogger } from './logger';
 import { createRuntime } from './runtime';
 
@@ -9,6 +9,7 @@ import { createRuntime } from './runtime';
  * Exactly one process may hold the worker lease and trade; extra replicas serve read-only API.
  */
 async function main() {
+  loadDotEnv();
   const cfg = loadConfig();
   const logger = createLogger(cfg.LOG_LEVEL, 'main');
   for (const w of cfg.warnings) logger.warn(w);

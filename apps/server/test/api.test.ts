@@ -102,6 +102,16 @@ describe('authentication & roles', () => {
   });
 });
 
+describe('request parsing', () => {
+  beforeEach(() => boot());
+  it('accepts action endpoints called with a JSON content-type and no body (what the browser sends)', async () => {
+    const r = await app.inject({ method: 'POST', url: '/api/live/preflight', headers: { authorization: `Bearer ${admin}`, 'content-type': 'application/json' }, remoteAddress: nextIp() });
+    expect(r.statusCode, r.body).toBe(200);
+    const bad = await app.inject({ method: 'POST', url: '/api/bot/stop', headers: { authorization: `Bearer ${admin}`, 'content-type': 'application/json' }, payload: '{not json', remoteAddress: nextIp() });
+    expect(bad.statusCode).toBe(400);
+  });
+});
+
 describe('fresh install defaults & mode selector', () => {
   beforeEach(() => boot());
 

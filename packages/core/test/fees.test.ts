@@ -85,6 +85,20 @@ describe('fee engine', () => {
   });
 });
 
+describe('optional extra tax', () => {
+  it('is zero by default and, when configured, is charged on each leg notional and included in the break-even move', () => {
+    const base = calcFee({ price: 3000, contracts: 20, contractValue: 0.01, role: 'taker' }, cfg());
+    expect(base.tax).toBe(0);
+    const taxed = feeConfigFrom(settings({ execution: { otherTaxRate: 0.001 } }), spec());
+    const f = calcFee({ price: 3000, contracts: 20, contractValue: 0.01, role: 'taker' }, taxed);
+    expect(f.tax).toBeCloseTo(0.6, 8); // 600 notional * 0.1%
+    expect(f.total).toBeCloseTo(0.354 + 0.6, 8);
+    const e0 = estimateEconomics({ side: 'long', entryPrice: 3000, targetPrice: 3005, stopPrice: 2996, contracts: 20, contractValue: 0.01 }, cfg());
+    const e1 = estimateEconomics({ side: 'long', entryPrice: 3000, targetPrice: 3005, stopPrice: 2996, contracts: 20, contractValue: 0.01 }, taxed);
+    expect(e1.breakevenMoveUsd).toBeGreaterThan(e0.breakevenMoveUsd);
+  });
+});
+
 describe('settings validation against exchange rules', () => {
   it('accepts the default configuration', () => {
     expect(hasErrors(validateSettings(defaultSettings(), spec(), { referencePrice: 3000 }))).toBe(false);

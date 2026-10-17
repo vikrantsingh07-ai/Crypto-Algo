@@ -96,7 +96,9 @@ export interface FeeBreakdown {
   /** commission = notional * rate (before GST). */
   commission: number;
   gst: number;
-  /** commission + gst */
+  /** Optional extra transaction tax (e.g. TDS), as a fraction of notional per leg; 0 by default. */
+  tax: number;
+  /** commission + gst + tax */
   total: number;
   rate: number;
   role: Role;
