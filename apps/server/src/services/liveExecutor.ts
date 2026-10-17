@@ -247,7 +247,6 @@ export class LiveExecutor {
   }
 
   async loadHistory(): Promise<void> {
-    const now = this.d.now();
     const saved = await this.d.repos.getDoc<{ baseline: number | null; peak: number | null }>('live_baseline');
     if (saved) {
       this.baselineEquityUsd = saved.baseline;
@@ -263,7 +262,6 @@ export class LiveExecutor {
         this.lastLossTs ??= closed[i].exitTs;
       } else break;
     }
-    void now;
   }
 
   /** Reset the live drawdown baseline (operator action, audited by the caller). */
@@ -291,7 +289,6 @@ export class LiveExecutor {
     if (!this.d.hasCredentials()) return this.fail('no API credentials configured');
     const acct = await this.refreshAccount();
     if (acct.error || !acct.position) return this.fail(`cannot read exchange state: ${acct.error ?? 'unknown'}`);
-    const pid = this.productId();
     const pos = acct.position;
     const dbOpen = await this.d.repos.openLiveTrades();
 

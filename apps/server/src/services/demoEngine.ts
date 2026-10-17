@@ -108,9 +108,7 @@ export class DemoEngine {
         this.lastLossTs ??= closed[i].exitTs;
       } else break;
     }
-    const last = closed[closed.length - 1];
     this.lastEntrySignalCandle = this.account.openPosition?.signalCandleTime ?? null;
-    if (last && this.lastEntrySignalCandle === null) this.lastEntrySignalCandle = null;
   }
 
   get openPosition(): OpenPosition | null {

@@ -62,6 +62,17 @@ describe('authentication & roles', () => {
     expect(audit.length).toBeGreaterThanOrEqual(5);
   });
 
+  it('locks a username after repeated failures from MANY different IPs (distributed guessing)', async () => {
+    const attempt = (n: number) => app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'wrong-' + n }, remoteAddress: `198.18.${Math.floor(n / 250)}.${(n % 250) + 1}` });
+    const codes: number[] = [];
+    for (let i = 0; i < 24; i++) codes.push((await attempt(i)).statusCode);
+    expect(codes.slice(0, 20).every((c) => c === 401)).toBe(true);
+    expect(codes.slice(20).every((c) => c === 423)).toBe(true);
+    // the correct password is refused too while the account is locked
+    const good = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: PW }, remoteAddress: '203.0.113.200' });
+    expect(good.statusCode).toBe(423);
+  });
+
   it('rate limits the login endpoint per IP', async () => {
     const codes: number[] = [];
     for (let i = 0; i < 14; i++) codes.push((await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'x', password: 'y' }, remoteAddress: '198.51.100.7' })).statusCode);

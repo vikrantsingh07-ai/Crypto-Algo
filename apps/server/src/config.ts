@@ -114,6 +114,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   if (isProd && !env.ADMIN_PASSWORD_HASH) throw new Error('ADMIN_PASSWORD_HASH must be set in production (generate with: npm run hash-password -- "your password")');
   if (env.DELTA_ENV === 'custom' && !env.DELTA_REST_URL) throw new Error('DELTA_ENV=custom requires DELTA_REST_URL');
   if (isProd && env.MARKET_DATA_SOURCE === 'synthetic') throw new Error('MARKET_DATA_SOURCE=synthetic is for development only and is not allowed in production');
+  if (isProd && !env.PROXY_SHARED_SECRET) warnings.push('PROXY_SHARED_SECRET not set: anyone who can reach this API directly can attempt logins; set the same secret here and on Vercel so only the dashboard proxy can call it');
   if (isProd && !env.DATABASE_URL) warnings.push('DATABASE_URL not set: using embedded PGlite storage (single instance only). Use managed Postgres in production.');
 
   return { ...env, DELTA_ENV: env.DELTA_ENV as DeltaEnvName, isProd, sessionSecret, encryptionKey, warnings };

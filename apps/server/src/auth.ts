@@ -18,6 +18,8 @@ interface UserRecord {
 }
 
 const MAX_FAILURES = 5;
+/** Failures per username across ALL client IPs (defeats distributed guessing / X-Forwarded-For rotation). */
+const MAX_USER_FAILURES = 20;
 const LOCK_MS = 15 * 60_000;
 // bcrypt hash of a random string: used to keep response time constant for unknown usernames
 const DUMMY_HASH = bcrypt.hashSync(randomId('dummy', 8), 8);
@@ -58,8 +60,10 @@ export class AuthService {
 
   async login(username: string, password: string, ip: string): Promise<{ ok: true; token: string; role: UserRole; username: string; expiresAt: number } | { ok: false; status: 401 | 423; error: string }> {
     const key = this.lockKey(ip, username);
+    const userKey = `user|${username.toLowerCase()}`;
     const rec = this.failures.get(key);
-    if (rec && rec.lockedUntil > this.now()) {
+    const userRec = this.failures.get(userKey);
+    if ((rec && rec.lockedUntil > this.now()) || (userRec && userRec.lockedUntil > this.now())) {
       await this.repos.audit({ actor: username, ip, action: 'login_blocked', success: false, details: { reason: 'locked' } }).catch(() => {});
       return { ok: false, status: 423, error: 'Too many failed attempts. Try again later.' };
     }
@@ -70,10 +74,15 @@ export class AuthService {
       const next = { count: prev + 1, lockedUntil: 0 };
       if (next.count >= MAX_FAILURES) next.lockedUntil = this.now() + LOCK_MS;
       this.failures.set(key, next);
+      const uPrev = userRec && (userRec.lockedUntil === 0 || userRec.lockedUntil > this.now()) ? userRec.count : 0;
+      const uNext = { count: uPrev + 1, lockedUntil: 0 };
+      if (uNext.count >= MAX_USER_FAILURES) uNext.lockedUntil = this.now() + LOCK_MS;
+      this.failures.set(userKey, uNext);
       await this.repos.audit({ actor: username, ip, action: 'login_failed', success: false, details: { attempts: next.count } }).catch(() => {});
       return { ok: false, status: 401, error: 'Invalid credentials' };
     }
     this.failures.delete(key);
+    this.failures.delete(userKey);
     const ttlMs = this.cfg.SESSION_TTL_HOURS * 3_600_000;
     const expiresAt = this.now() + ttlMs;
     const token = await new SignJWT({ role: user.role })

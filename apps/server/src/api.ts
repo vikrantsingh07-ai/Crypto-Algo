@@ -215,7 +215,7 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
     return { ok: true, state: res.state };
   });
 
-  app.post('/api/live/reconcile', { ...admin, ...strict(30) }, async (req, reply) => {
+  app.post('/api/live/reconcile', { ...admin, ...strict(30) }, async (_req, reply) => {
     if (!needWorker(reply)) return;
     await rt.live.reconcile();
     return { reconciled: rt.live.reconciled, reason: rt.live.reconcileReason, live: rt.live.snapshot() };
