@@ -124,13 +124,28 @@ export const SettingsSchema = z.object({
        */
       otherTaxRate: z.number().min(0).max(0.05).default(0),
       /**
-       * Optional exit-fee waiver. DISABLED by default: no official source verified that exiting
-       * inside 30 minutes is free, so it is never assumed. Enable only if your fee statement shows it.
+       * Delta "Scalper Offer": a position closed within 30 minutes of opening (ETHUSD / BTCUSD futures) pays NO
+       * closing fee - only the opening fee. Terms as published by Delta and supplied by the operator: the account
+       * must have joined the offer (trades before joining are not eligible), liquidations are not eligible, and
+       * Delta may change or end the offer at any time. The offer is not visible through the public API, so:
+       *  - Demo / backtests / pre-trade economics assume the waiver while `enabled`;
+       *  - Live P&L always uses the fees the exchange actually charged, and the first eligible live closes are
+       *    checked against the assumption (see `waiverStatus` in the live snapshot). If the exchange charged a
+       *    closing fee on an eligible trade the bot falls back to no-waiver economics automatically.
+       * Turn this off if your Delta account has not joined the offer.
        */
       exitFeeWaiver: z
         .object({
-          enabled: z.boolean().default(false),
+          enabled: z.boolean().default(true),
+          /** Close-within window of the offer. */
           withinMinutes: z.number().min(1).max(1440).default(30),
+          /**
+           * Safety margin: time exits fire this many seconds BEFORE the window ends so latency or a slow fill can
+           * not push the closing fill past the cut-off (an exit at 30:01 would pay the full closing fee).
+           */
+          safetyMarginSeconds: z.number().int().min(0).max(600).default(90),
+          /** When true the hard time-exit is clamped to (window - safety margin) while the waiver is assumed. */
+          clampTimeExit: z.boolean().default(true),
         })
         .prefault({}),
       /** Adverse slippage applied to simulated market fills (USD per ETH). */
@@ -178,6 +193,19 @@ export type StrategyParams = z.infer<typeof StrategyParamsSchema>;
 
 export function defaultSettings(): Settings {
   return SettingsSchema.parse({});
+}
+
+/**
+ * The longest a position may be held before the bot market-closes it.
+ * With the Scalper Offer waiver assumed this is clamped to (window - safety margin), so that even the
+ * time exit is a free exit; otherwise it is simply `exits.maxHoldMinutes`.
+ */
+export function effectiveMaxHoldMs(settings: Settings, waiverOn: boolean = settings.execution.exitFeeWaiver.enabled): number {
+  const hold = settings.exits.maxHoldMinutes * 60_000;
+  const w = settings.execution.exitFeeWaiver;
+  if (!waiverOn || !w.clampTimeExit) return hold;
+  const limit = w.withinMinutes * 60_000 - w.safetyMarginSeconds * 1000;
+  return Math.max(60_000, Math.min(hold, limit));
 }
 
 export function deepMerge<T>(base: T, patch: unknown): T {
@@ -274,6 +302,26 @@ export function validateSettings(settings: Settings, spec: ContractSpec, ctx: Va
     err('exits.breakevenAfterMinutes', 'Break-even time must be earlier than the maximum holding time.');
   }
   if (settings.exits.maxHoldMinutes > 30) warn('exits.maxHoldMinutes', 'Holding longer than 30 minutes is outside the intended scalping profile.');
+
+  const w = settings.execution.exitFeeWaiver;
+  if (w.enabled) {
+    const effMin = effectiveMaxHoldMs(settings, true) / 60_000;
+    if (effMin < settings.exits.maxHoldMinutes) {
+      warn(
+        'exits.maxHoldMinutes',
+        `Scalper Offer waiver is assumed, so the time exit is clamped to ${effMin.toFixed(1)} min (window ${w.withinMinutes} min minus ${w.safetyMarginSeconds}s safety margin) to keep every exit fee-free.`,
+      );
+    }
+    if (!w.clampTimeExit && settings.exits.maxHoldMinutes >= w.withinMinutes) {
+      warn('execution.exitFeeWaiver.clampTimeExit', 'A time exit at or after the waiver window pays the full closing fee, but the estimates still assume it is free.');
+    }
+    if (w.safetyMarginSeconds < 20) {
+      warn('execution.exitFeeWaiver.safetyMarginSeconds', 'A very small safety margin risks the exit fill landing after the 30-minute cut-off and paying the closing fee.');
+    }
+    if (settings.exits.breakevenAfterMinutes * 60_000 >= effectiveMaxHoldMs(settings, true) && settings.exits.timeExitPolicy === 'breakeven_then_close') {
+      err('exits.breakevenAfterMinutes', 'Break-even time must be earlier than the (clamped) time exit.');
+    }
+  }
 
   if (spec.tradingStatus !== 'operational' && spec.verified) {
     warn('instrument.symbol', `Exchange reports trading status "${spec.tradingStatus}" for ${spec.symbol}.`);

@@ -15,7 +15,9 @@ import { round } from './math';
  * commission charged is always returned on each fill by the exchange; in LIVE mode the fill's
  * `commission` is authoritative and this module is only used for estimates.
  *
- * Exit-fee waivers are NOT assumed. They only apply when explicitly enabled in settings.
+ * Delta "Scalper Offer": an exit leg of a position that was open for at most `waiver.withinMinutes`
+ * pays no commission/GST/tax (the opening leg is always charged). Controlled by
+ * `settings.execution.exitFeeWaiver`; in LIVE the exchange-reported fee is authoritative.
  */
 export interface FeeConfig {
   makerRate: number;
@@ -26,13 +28,22 @@ export interface FeeConfig {
   usdInrRate: number;
 }
 
-export function feeConfigFrom(settings: Settings, spec: ContractSpec): FeeConfig {
+export interface FeeConfigOptions {
+  /**
+   * Overrides `settings.execution.exitFeeWaiver.enabled`. Used by the live engine to fall back to
+   * "no waiver" when the exchange has been observed charging a closing fee on an eligible trade.
+   */
+  waiverOverride?: boolean;
+}
+
+export function feeConfigFrom(settings: Settings, spec: ContractSpec, opts: FeeConfigOptions = {}): FeeConfig {
+  const w = settings.execution.exitFeeWaiver;
   return {
     makerRate: settings.execution.makerFeeRate ?? spec.makerFeeRate,
     takerRate: settings.execution.takerFeeRate ?? spec.takerFeeRate,
     gstRate: settings.execution.gstRate,
     otherTaxRate: settings.execution.otherTaxRate ?? 0,
-    waiver: { ...settings.execution.exitFeeWaiver },
+    waiver: { enabled: opts.waiverOverride ?? w.enabled, withinMinutes: w.withinMinutes },
     usdInrRate: settings.execution.usdInrRate,
   };
 }
@@ -59,7 +70,9 @@ export function calcFee(input: FeeInput, cfg: FeeConfig): FeeBreakdown {
     cfg.waiver.enabled &&
     input.holdMs !== undefined &&
     input.holdMs <= cfg.waiver.withinMinutes * 60_000;
-  const commission = waived ? 0 : notional * rate;
+  const fullCommission = notional * rate;
+  const fullTotal = fullCommission * (1 + cfg.gstRate) + notional * (cfg.otherTaxRate ?? 0);
+  const commission = waived ? 0 : fullCommission;
   const gst = commission * cfg.gstRate;
   const tax = waived ? 0 : notional * (cfg.otherTaxRate ?? 0);
   return {
@@ -71,6 +84,7 @@ export function calcFee(input: FeeInput, cfg: FeeConfig): FeeBreakdown {
     rate,
     role: input.role,
     waived,
+    saved: round(waived ? fullTotal : 0, 8),
   };
 }
 
@@ -141,6 +155,12 @@ export interface TradeEconomics {
   riskNet: number;
   feeIfTarget: number;
   feeIfStop: number;
+  /** Opening-leg fee (always charged). */
+  entryFee: number;
+  /** True when the exit legs are assumed fee-free (Scalper Offer, exit inside the window). */
+  exitFeeWaived: boolean;
+  /** Closing fee that the waiver saves on a take-profit exit (0 when not waived). */
+  exitFeeSaved: number;
   /** Price move (USD per ETH) needed just to cover fees, with the given entry/exit roles. */
   breakevenMoveUsd: number;
   netRewardRisk: number;
@@ -161,6 +181,8 @@ export interface EconomicsInput {
   stopRole?: Role;
   /** Slippage assumed on the stop fill, USD per ETH (adverse). */
   stopSlippageUsd?: number;
+  /** Expected hold at exit, used to evaluate the Scalper Offer window (default 0 = inside the window). */
+  exitHoldMs?: number;
 }
 
 /** Pre-trade expected economics, used by the risk manager and shown in the UI. */
@@ -172,9 +194,15 @@ export function estimateEconomics(i: EconomicsInput, cfg: FeeConfig): TradeEcono
   const dir = i.side === 'long' ? 1 : -1;
   const stopFillPrice = i.stopPrice - dir * (i.stopSlippageUsd ?? 0);
 
+  // Target / stop / (clamped) time exits all happen inside the offer window, so when the waiver is assumed the
+  // expected exit fee is zero: model the exit as happening at hold = 0.
+  const exitHoldMs = i.exitHoldMs ?? 0;
   const entryFee = calcFee({ price: i.entryPrice, contracts: i.contracts, contractValue: i.contractValue, role: entryRole }, cfg).total;
-  const targetExitFee = calcFee({ price: i.targetPrice, contracts: i.contracts, contractValue: i.contractValue, role: targetRole }, cfg).total;
-  const stopExitFee = calcFee({ price: stopFillPrice, contracts: i.contracts, contractValue: i.contractValue, role: stopRole }, cfg).total;
+  const targetExit = calcFee({ price: i.targetPrice, contracts: i.contracts, contractValue: i.contractValue, role: targetRole, isExit: true, holdMs: exitHoldMs }, cfg);
+  const stopExit = calcFee({ price: stopFillPrice, contracts: i.contracts, contractValue: i.contractValue, role: stopRole, isExit: true, holdMs: exitHoldMs }, cfg);
+  const targetExitFee = targetExit.total;
+  const stopExitFee = stopExit.total;
+  const exitFeeWaived = targetExit.waived;
 
   const rewardGross = dir * (i.targetPrice - i.entryPrice) * qty;
   const riskGross = dir * (i.entryPrice - stopFillPrice) * qty;
@@ -184,7 +212,7 @@ export function estimateEconomics(i: EconomicsInput, cfg: FeeConfig): TradeEcono
   const riskNet = riskGross + feeIfStop;
 
   // Break-even move m solving  m*qty = entryFee + exitRate' * qty * (p + dir*m), exitRate' = rate*(1+gst)
-  const exitRate = (targetRole === 'maker' ? cfg.makerRate : cfg.takerRate) * (1 + cfg.gstRate) + (cfg.otherTaxRate ?? 0);
+  const exitRate = exitFeeWaived ? 0 : (targetRole === 'maker' ? cfg.makerRate : cfg.takerRate) * (1 + cfg.gstRate) + (cfg.otherTaxRate ?? 0);
   const breakevenMoveUsd = (entryFee + exitRate * qty * i.entryPrice) / (qty * (1 - dir * exitRate));
 
   return {
@@ -195,6 +223,9 @@ export function estimateEconomics(i: EconomicsInput, cfg: FeeConfig): TradeEcono
     riskNet: round(riskNet, 8),
     feeIfTarget: round(feeIfTarget, 8),
     feeIfStop: round(feeIfStop, 8),
+    entryFee: round(entryFee, 8),
+    exitFeeWaived,
+    exitFeeSaved: round(targetExit.saved ?? 0, 8),
     breakevenMoveUsd: round(breakevenMoveUsd, 6),
     netRewardRisk: riskNet > 0 ? round(rewardNet / riskNet, 6) : 0,
   };

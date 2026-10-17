@@ -122,10 +122,26 @@ describe('risk manager', () => {
   it('enforces per-trade risk, net reward and net reward:risk using fees', () => {
     const strict = settings({ limits: { perTradeRiskUsd: 1.0 } });
     expect(failed(decide({}, strict))).toContain('PER_TRADE_RISK');
-    // Default config: with taker entry+stop and a $4 target the fee drag fails the net reward gate.
-    const def = settings();
-    const d = decide({}, def, signal({ targetMoveUsd: 4, stopMoveUsd: 4 }));
+    // WITHOUT the Scalper Offer: taker entry + taker stop and a $4 target - the fee drag fails the net reward gate.
+    const noWaiver = settings({ execution: { exitFeeWaiver: { enabled: false } } });
+    const d = decide({}, noWaiver, signal({ targetMoveUsd: 4, stopMoveUsd: 4 }));
     expect(failed(d)).toContain('NET_REWARD_RISK');
+  });
+
+  it('Scalper Offer: the same $4 trade passes the net-reward gates because only the entry fee is charged', () => {
+    const def = settings();
+    const sig = signal({ targetMoveUsd: 4, stopMoveUsd: 3 });
+    const d = decide({}, def, sig);
+    expect(failed(d)).toEqual([]);
+    expect(d.plan!.economics.exitFeeWaived).toBe(true);
+    expect(d.plan!.economics.feeIfTarget).toBeCloseTo(d.plan!.economics.entryFee, 8);
+    // net = gross 0.80 - 1 entry fee (~0.354) ; risk = 3 * 0.2 + stop slippage 0.05 + entry fee
+    expect(d.plan!.economics.rewardNet).toBeGreaterThan(0.4);
+    expect(d.plan!.economics.netRewardRisk).toBeGreaterThan(0.4);
+    // disabling the waiver makes the identical trade materially worse
+    const off = decide({}, settings({ execution: { exitFeeWaiver: { enabled: false } } }), sig);
+    expect(off.plan!.economics.rewardNet).toBeLessThan(d.plan!.economics.rewardNet);
+    expect(off.plan!.economics.netRewardRisk).toBeLessThan(d.plan!.economics.netRewardRisk);
   });
 
   it('requires free margin and a liquidation buffer; leverage never overrides them', () => {
@@ -200,26 +216,73 @@ describe('paper execution simulator', () => {
     expect(r.exit?.reason).toBe('stop_loss');
   });
 
-  it('time-exits at the maximum holding time with a market order', () => {
+  it('time-exits with a market order: at 28.5 min while the Scalper Offer waiver is assumed (90 s inside the window)', () => {
     const pos = open();
-    const r = stepPosition(pos, tick(3001, 3001.1, T0 + 30 * 60_000, { high: 3001.2, low: 3000.9 }), ctx);
+    const before = stepPosition(pos, tick(3001, 3001.1, T0 + 28 * 60_000, { high: 3001.2, low: 3000.9 }), ctx);
+    expect(before.exit).toBeNull();
+    const r = stepPosition(pos, tick(3001, 3001.1, T0 + 28.5 * 60_000, { high: 3001.2, low: 3000.9 }), ctx);
     expect(r.exit?.reason).toBe('time_exit');
     expect(r.exit?.role).toBe('taker');
+    // ... and that exit is free: only the entry fee is ever paid
+    const trade = closePosition(r.position, r.exit!, T0 + 28.5 * 60_000, ctx);
+    expect(trade.exitFee).toBe(0);
+    expect(trade.fees).toBeCloseTo(pos.entryFee.total, 8);
   });
 
-  it('tightens the stop to a fee-covering break-even after 15 minutes when in profit', () => {
+  it('time-exits at the configured maximum holding time when the waiver is off (full closing fee)', () => {
+    const off = paperContext(settings({ execution: { exitFeeWaiver: { enabled: false } } }), sp);
+    const pos = openPaperPosition({ id: 'n1', signal: signal(), tick: tick(2999.95, 3000.05, T0), contracts: 20 }, off);
+    expect(stepPosition(pos, tick(3001, 3001.1, T0 + 29.9 * 60_000, { high: 3001.2, low: 3000.9 }), off).exit).toBeNull();
+    const r = stepPosition(pos, tick(3001, 3001.1, T0 + 30 * 60_000, { high: 3001.2, low: 3000.9 }), off);
+    expect(r.exit?.reason).toBe('time_exit');
+    const trade = closePosition(r.position, r.exit!, T0 + 30 * 60_000, off);
+    expect(trade.exitFee).toBeGreaterThan(0);
+  });
+
+  it('Scalper Offer: stop-loss and take-profit exits inside 30 minutes pay no closing fee; a late close does', () => {
     const pos = open();
+    const stop = stepPosition(pos, tick(2996, 2996.1, T0 + 5 * 60_000, { low: 2995.5, high: 3000 }), ctx);
+    const stopTrade = closePosition(stop.position, stop.exit!, T0 + 5 * 60_000, ctx);
+    expect(stopTrade.exitFee).toBe(0);
+    expect(stopTrade.fees).toBeCloseTo(pos.entryFee.total, 8);
+    expect(stopTrade.netPnl).toBeCloseTo(stopTrade.grossPnl - pos.entryFee.total + stopTrade.funding, 8);
+
+    const tp = stepPosition(pos, tick(3005.5, 3005.6, T0 + 10 * 60_000, { high: pos.targetPrice + 0.2, low: 3001 }), ctx);
+    const tpTrade = closePosition(tp.position, tp.exit!, T0 + 10 * 60_000, ctx);
+    expect(tpTrade.exitFee).toBe(0);
+    expect(tpTrade.netPnl).toBeCloseTo(tpTrade.grossPnl - pos.entryFee.total, 8);
+
+    // The same stop exit filled at 30:01 is outside the offer: the closing fee is charged.
+    const late = closePosition(stop.position, stop.exit!, T0 + 30 * 60_000 + 1000, ctx);
+    expect(late.exitFee).toBeGreaterThan(0);
+  });
+
+  it('tightens the stop to a fee-covering break-even after 15 minutes when in profit (no waiver: needs ~$3.5)', () => {
+    const off = paperContext(settings({ execution: { exitFeeWaiver: { enabled: false } } }), sp);
+    const pos = openPaperPosition({ id: 'be0', signal: signal(), tick: tick(2999.95, 3000.05, T0), contracts: 20 }, off);
     // Not yet in profit AFTER fees (needs ~$3.5 move): the stop must NOT be moved.
-    const early = stepPosition(pos, tick(3003, 3003.1, T0 + 16 * 60_000, { high: 3003.2, low: 3002.9 }), ctx);
+    const early = stepPosition(pos, tick(3003, 3003.1, T0 + 16 * 60_000, { high: 3003.2, low: 3002.9 }), off);
     expect(early.position.breakevenArmed).toBe(false);
     expect(early.position.stopPrice).toBe(pos.stopPrice);
-    const r = stepPosition(pos, tick(3004.2, 3004.3, T0 + 16 * 60_000, { high: 3004.4, low: 3004.1 }), ctx);
+    const r = stepPosition(pos, tick(3004.2, 3004.3, T0 + 16 * 60_000, { high: 3004.4, low: 3004.1 }), off);
     expect(r.exit).toBeNull();
     expect(r.position.breakevenArmed).toBe(true);
     expect(r.position.stopPrice).toBeGreaterThan(pos.entryPrice);
     // Then a pullback to the new stop exits as breakeven_stop with ~zero net loss
-    const back = stepPosition(r.position, tick(3000.5, 3000.6, T0 + 17 * 60_000, { high: 3003, low: r.position.stopPrice - 0.1 }), ctx);
+    const back = stepPosition(r.position, tick(3000.5, 3000.6, T0 + 17 * 60_000, { high: 3003, low: r.position.stopPrice - 0.1 }), off);
     expect(back.exit?.reason).toBe('breakeven_stop');
+  });
+
+  it('Scalper Offer: the break-even stop only has to recover the ENTRY fee (~$1.8 move), since the exit is free', () => {
+    const pos = open();
+    // entry 3000.15 + entryFee/qty (0.354/0.2 = 1.77) = ~3001.92 : at bid 3001.0 not yet in profit after fees ...
+    const early = stepPosition(pos, tick(3001, 3001.1, T0 + 16 * 60_000, { high: 3001.2, low: 3000.9 }), ctx);
+    expect(early.position.breakevenArmed).toBe(false);
+    // ... at bid 3003 it is, and the stop moves up to ~entry + 1.8, not entry + 3.5
+    const r = stepPosition(pos, tick(3003, 3003.1, T0 + 16 * 60_000, { high: 3003.2, low: 3002.9 }), ctx);
+    expect(r.position.breakevenArmed).toBe(true);
+    expect(r.position.stopPrice).toBeGreaterThan(pos.entryPrice + 1.5);
+    expect(r.position.stopPrice).toBeLessThan(pos.entryPrice + 2.2);
   });
 
   it('charges funding when a funding timestamp is crossed (long pays positive funding)', () => {

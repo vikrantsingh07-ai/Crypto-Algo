@@ -102,7 +102,10 @@ export interface FeeBreakdown {
   total: number;
   rate: number;
   role: Role;
+  /** True when the Scalper Offer exit-fee waiver applied to this leg (fee charged = 0). */
   waived: boolean;
+  /** Fee the waiver saved on this leg, USD (absent on rows stored before the waiver existed). */
+  saved?: number;
 }
 
 export interface OpenPosition {
@@ -155,6 +158,8 @@ export interface ClosedTrade {
   grossPnl: number;
   entryFee: number;
   exitFee: number;
+  /** Closing fee waived by the Scalper Offer on this trade, USD (0 / absent when the exit was charged). */
+  exitFeeSaved?: number;
   fees: number;
   slippageCost: number;
   funding: number;

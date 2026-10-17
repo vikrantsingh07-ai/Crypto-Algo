@@ -1,7 +1,7 @@
 import type { ContractSpec, Quote, Side, Signal, TradingMode } from './types';
 import type { Settings } from './settings';
 import { quantityToContracts } from './settings';
-import { estimateEconomics, feeConfigFrom, type TradeEconomics } from './fees';
+import { estimateEconomics, feeConfigFrom, type FeeConfigOptions, type TradeEconomics } from './fees';
 import { roundToTick } from './math';
 
 /**
@@ -89,6 +89,8 @@ export interface RiskInput {
   state: RiskState;
   signal: Signal;
   quote: Quote;
+  /** Live passes `{ waiverOverride: false }` after the exchange was seen charging a closing fee on an eligible trade. */
+  feeOptions?: FeeConfigOptions;
 }
 
 export interface PlannedTrade {
@@ -297,7 +299,7 @@ export function evaluateEntryRisk(input: RiskInput): RiskDecision {
     const marginUsd = notional / settings.position.leverage;
     const liq = estimateLiquidationPrice(side, entry, settings.position.leverage, spec.maintenanceMarginPct);
     const liqDist = Math.abs(entry - liq);
-    const fees = feeConfigFrom(settings, spec);
+    const fees = feeConfigFrom(settings, spec, input.feeOptions);
     const economics = estimateEconomics(
       {
         side,

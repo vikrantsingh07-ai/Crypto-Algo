@@ -10,8 +10,8 @@ import type {
   Side,
   Signal,
 } from './types';
-import type { Settings } from './settings';
-import { calcFee, calcPnl, estimateEconomics, feeConfigFrom, grossPnl, type FeeConfig } from './fees';
+import { effectiveMaxHoldMs, type Settings } from './settings';
+import { calcFee, calcPnl, estimateEconomics, feeConfigFrom, grossPnl, type FeeConfig, type FeeConfigOptions } from './fees';
 import { estimateLiquidationPrice } from './risk';
 import { round, roundToTick } from './math';
 
@@ -26,7 +26,10 @@ import { round, roundToTick } from './math';
  *  - Take profit: resting reduce-only limit. Fills at the target price (maker fee) once the
  *    market trades THROUGH it (`tpFillModel = 'through'`, one tick beyond) or touches it
  *    (`'touch'`). With `takeProfitOrderType = 'market'` it fills as taker with slippage.
- *  - Time exit: market close at bid/ask with slippage; taker fee.
+ *  - Time exit: market close at bid/ask with slippage; taker fee. While the Scalper Offer waiver is assumed
+ *    the time exit fires `safetyMarginSeconds` before the 30-minute window ends (see `effectiveMaxHoldMs`).
+ *  - Scalper Offer: any exit within the window pays no closing fee (`calcFee`, holdMs <= window); the entry
+ *    fee is always charged. A close after the window (waiver off / clamp off) pays the normal closing fee.
  *  - If stop and target both trigger inside one tick/candle, the STOP is assumed to hit first.
  *  - Funding is charged when a funding timestamp is crossed while the position is open.
  */
@@ -59,8 +62,13 @@ export interface PaperContext {
   fundingRate?: number;
 }
 
-export function paperContext(settings: Settings, spec: ContractSpec, fundingRate = 0): PaperContext {
-  return { settings, spec, fees: feeConfigFrom(settings, spec), fundingRate };
+export function paperContext(settings: Settings, spec: ContractSpec, fundingRate = 0, feeOpts: FeeConfigOptions = {}): PaperContext {
+  return { settings, spec, fees: feeConfigFrom(settings, spec, feeOpts), fundingRate };
+}
+
+/** Time exit used by the simulator and by live: the Scalper Offer clamp applies while the waiver is assumed. */
+export function timeExitMs(ctx: PaperContext): number {
+  return effectiveMaxHoldMs(ctx.settings, ctx.fees.waiver.enabled);
 }
 
 export function newDemoAccount(startingBalanceUsd: number, now: number): DemoAccountState {
@@ -172,10 +180,14 @@ export interface StepResult {
   fundingDelta: number;
 }
 
-/** Breakeven stop price that covers entry+exit taker/maker fees on the current position. */
-export function breakevenStopPrice(pos: OpenPosition, ctx: PaperContext): number {
+/**
+ * Breakeven stop price that covers entry+exit fees on the current position. With the Scalper Offer waiver
+ * the closing leg is free while the position is inside the window, so only the entry fee has to be recovered.
+ */
+export function breakevenStopPrice(pos: OpenPosition, ctx: PaperContext, heldMs = 0): number {
   const dir = pos.side === 'long' ? 1 : -1;
-  const exitRate = ctx.fees.takerRate * (1 + ctx.fees.gstRate) + (ctx.fees.otherTaxRate ?? 0);
+  const waived = ctx.fees.waiver.enabled && heldMs <= ctx.fees.waiver.withinMinutes * 60_000;
+  const exitRate = waived ? 0 : ctx.fees.takerRate * (1 + ctx.fees.gstRate) + (ctx.fees.otherTaxRate ?? 0);
   const qty = pos.qtyEth;
   const move = (pos.entryFee.total + exitRate * qty * pos.entryPrice) / (qty * (1 - dir * exitRate));
   return roundToTick(pos.entryPrice + dir * move, ctx.spec.tickSize, pos.side === 'long' ? 'up' : 'down');
@@ -240,7 +252,7 @@ export function stepPosition(prev: OpenPosition, tick: Tick, ctx: PaperContext):
     !pos.breakevenArmed &&
     heldMs >= s.exits.breakevenAfterMinutes * 60_000
   ) {
-    const be = breakevenStopPrice(pos, ctx);
+    const be = breakevenStopPrice(pos, ctx, heldMs);
     const inProfit = dir === 1 ? tick.bid > be : tick.ask < be;
     if (inProfit) {
       // Only ever tighten the stop.
@@ -251,7 +263,7 @@ export function stepPosition(prev: OpenPosition, tick: Tick, ctx: PaperContext):
   }
 
   // 5) Time exit (hard backstop): close at market.
-  if (heldMs >= s.exits.maxHoldMinutes * 60_000) {
+  if (heldMs >= timeExitMs(ctx)) {
     const ref = dir === 1 ? tick.bid : tick.ask;
     const price = roundToTick(ref - dir * slip, spec.tickSize, dir === 1 ? 'down' : 'up');
     return { position: pos, exit: { reason: 'time_exit', price, role: 'taker' }, fundingDelta };
@@ -270,6 +282,10 @@ export function marketExit(pos: OpenPosition, tick: Tick, reason: ExitReason, ct
 /** Finalise a closed trade with the fee engine. */
 export function closePosition(pos: OpenPosition, exit: ExitDecision, exitTs: number, ctx: PaperContext): ClosedTrade {
   const holdMs = exitTs - pos.entryTs;
+  const exitLeg = calcFee(
+    { price: exit.price, contracts: pos.contracts, contractValue: pos.contractValue, role: exit.role, isExit: true, holdMs },
+    ctx.fees,
+  );
   const pnl = calcPnl(
     {
       side: pos.side,
@@ -303,6 +319,7 @@ export function closePosition(pos: OpenPosition, exit: ExitDecision, exitTs: num
     grossPnl: pnl.grossPnl,
     entryFee: pnl.entryFee,
     exitFee: pnl.exitFee,
+    exitFeeSaved: round(exitLeg.saved ?? 0, 8),
     fees: pnl.fees,
     slippageCost: pnl.slippageCost,
     funding: pnl.funding,

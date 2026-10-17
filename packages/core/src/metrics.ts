@@ -44,6 +44,8 @@ export interface PerformanceMetrics {
   exitReasons: Record<string, number>;
   /** Win rate needed to break even given the realised average win / loss sizes. */
   breakevenWinRate: number | null;
+  /** Closing fees the Scalper Offer waived across these trades (USD). */
+  feesSavedUsd: number;
   byRegime: Record<string, GroupStats>;
   bySide: Record<Side, GroupStats>;
   /** True when fewer than 100 trades: results are not statistically meaningful. */
@@ -128,6 +130,7 @@ export function computeMetrics(trades: ClosedTrade[], startingBalance: number, u
     winRateCI95: wilsonInterval(wins.length, n),
     grossPnl: round(sum(sorted.map((t) => t.grossPnl)), 6),
     fees: round(sum(sorted.map((t) => t.fees)), 6),
+    feesSavedUsd: round(sum(sorted.map((t) => t.exitFeeSaved ?? 0)), 6),
     slippageCost: round(sum(sorted.map((t) => t.slippageCost)), 6),
     funding: round(sum(sorted.map((t) => t.funding)), 6),
     totalCosts: round(sum(sorted.map((t) => t.fees)) - sum(sorted.map((t) => t.funding)) + sum(sorted.map((t) => t.slippageCost)), 6),
