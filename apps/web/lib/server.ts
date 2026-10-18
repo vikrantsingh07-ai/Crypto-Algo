@@ -5,9 +5,22 @@
 
 export const SESSION_COOKIE = 'ca_session';
 
+/** Hosts where plain http between the dashboard server and the backend is acceptable (same machine / private network). */
+const PRIVATE_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|[^.]+|.*\.(internal|local|svc|cluster\.local))$/i;
+
 export function backendUrl(): string {
-  const url = process.env.BACKEND_URL;
+  const url = process.env.BACKEND_URL?.trim();
   if (!url) throw new Error('BACKEND_URL is not configured on the dashboard server');
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('BACKEND_URL is not a valid URL (expected https://your-backend.example.com)');
+  }
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && PRIVATE_HOST.test(parsed.hostname))) {
+    // The proxy forwards the login password and PROXY_SHARED_SECRET in this request: never over plain http on the internet.
+    throw new Error('BACKEND_URL must use https:// (plain http is only allowed for localhost or a private network host)');
+  }
   return url.replace(/\/$/, '');
 }
 

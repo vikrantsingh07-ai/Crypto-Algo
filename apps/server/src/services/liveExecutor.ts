@@ -78,6 +78,10 @@ export interface LiveDeps {
   quoteAgeMs: () => number | null;
   feedHealthy: () => boolean;
   hasCredentials: () => boolean;
+  /** Identifies the exchange account (environment + key fingerprint) the waiver verdict belongs to; null = unknown yet. */
+  waiverScope?: () => string | null;
+  /** Deployer-level lock (LIVE_HARD_DISABLE): no NEW exposure while set, even if the database says live is armed. */
+  hardDisabled?: () => boolean;
   now: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger: Logger;
@@ -121,6 +125,8 @@ export interface ScalperCheck {
 }
 
 export interface WaiverState {
+  /** Delta environment + API key this verdict was observed with; a different account starts "unverified" again. */
+  scope?: string | null;
   status: ScalperStatus;
   confirmedCount: number;
   lastCheck: ScalperCheck | null;
@@ -187,7 +193,32 @@ export class LiveExecutor {
 
   /** Whether LIVE economics may assume a free closing leg: enabled in settings AND not contradicted by the exchange. */
   waiverEffective(): boolean {
+    this.ensureWaiverScope();
     return this.d.getSettings().execution.exitFeeWaiver.enabled && this.waiver.status !== 'not_applied';
+  }
+
+  /**
+   * The verdict (confirmed / not applied) belongs to one Delta account. When the environment or API key changes the
+   * old observation says nothing about the new account, so it starts over as "unverified". Unknown scope (credentials
+   * not loaded yet) never resets anything.
+   */
+  private ensureWaiverScope(): void {
+    const current = this.d.waiverScope?.() ?? null;
+    if (current === null) return;
+    if (this.waiver.scope === undefined || this.waiver.scope === null) {
+      this.waiver = { ...this.waiver, scope: current };
+      return;
+    }
+    if (this.waiver.scope === current) return;
+    const previous = this.waiver;
+    this.waiver = { status: 'unverified', confirmedCount: 0, lastCheck: null, since: this.d.now(), scope: current };
+    this.d.logger.warn('scalper offer verdict reset: exchange environment or API key changed', { previous: previous.status });
+    void this.persistWaiver().catch((e) => this.d.logger.error('could not persist waiver reset', { error: (e as Error).message }));
+    if (previous.status !== 'unverified') {
+      void this.d.repos
+        .audit({ actor: 'system', action: 'scalper_offer_status_reset', details: { reason: 'exchange environment or API key changed', previous: { status: previous.status, confirmedCount: previous.confirmedCount } } })
+        .catch(() => {});
+    }
   }
 
   private feeOpts(): FeeConfigOptions {
@@ -203,6 +234,7 @@ export class LiveExecutor {
     if (!saved) return;
     const status: ScalperStatus = saved.status === 'confirmed' || saved.status === 'not_applied' ? saved.status : 'unverified';
     this.waiver = {
+      scope: typeof saved.scope === 'string' ? saved.scope : null,
       status,
       confirmedCount: Number.isFinite(saved.confirmedCount) ? Number(saved.confirmedCount) : 0,
       lastCheck: saved.lastCheck && typeof saved.lastCheck === 'object' ? (saved.lastCheck as ScalperCheck) : null,
@@ -219,7 +251,7 @@ export class LiveExecutor {
     return this.run(async () => {
       const previous = this.waiver;
       const changed = previous.status !== 'unverified' || previous.confirmedCount > 0 || previous.lastCheck !== null;
-      this.waiver = { status: 'unverified', confirmedCount: 0, lastCheck: null, since: this.d.now() };
+      this.waiver = { status: 'unverified', confirmedCount: 0, lastCheck: null, since: this.d.now(), scope: this.d.waiverScope?.() ?? previous.scope ?? null };
       await this.persistWaiver();
       return { previous, changed };
     });
@@ -307,7 +339,8 @@ export class LiveExecutor {
       }
     }
     this.waiver = next;
-    await this.persistWaiver();
+    // The in-memory verdict already gates entries; a failed write must neither hide the audit/attention item nor throw.
+    await this.persistWaiver().catch((e) => this.d.logger.error('could not persist waiver status', { error: (e as Error).message }));
     if (notify) await notify();
     if (next.status !== prev.status) this.d.logger.warn('scalper offer status changed', { from: prev.status, to: next.status, tradeId: trade.id, holdMs: trade.holdMs, exitFeeUsd });
   }
@@ -324,6 +357,7 @@ export class LiveExecutor {
   async assertEntryAllowed(): Promise<BotState> {
     const bot = await this.d.getBotState();
     const why: string[] = [];
+    if (this.d.hardDisabled?.()) why.push('LIVE_HARD_DISABLE is set on this deployment');
     if (bot.mode !== 'live') why.push('mode is not live');
     if (!bot.liveArmed) why.push('live execution is not armed');
     if (bot.killSwitch) why.push('kill switch engaged');
@@ -656,15 +690,20 @@ export class LiveExecutor {
     const exitPrice = vwap(exitFills) ?? t.entryPrice ?? entryPrice;
     const contracts = t.contracts;
     const usd = (v: number) => v; // settling asset assumed USD-valued; INR handled in toUsd for balances
-    const entryFee = entryFills.length ? usd(entryFills.reduce((s, f) => s + f.commission, 0)) : t.entryFee ?? 0;
+    // A fill without a usable commission figure is NOT evidence of a free fill: fall back to estimates for that leg.
+    const entryFeesKnown = entryFills.length > 0 && entryFills.every((f) => f.commissionKnown !== false);
+    const exitFeesKnown = exitFills.length > 0 && exitFills.every((f) => f.commissionKnown !== false);
+    const entryFee = entryFeesKnown ? usd(entryFills.reduce((s, f) => s + f.commission, 0)) : t.entryFee ?? 0;
     const exitTs = exitFills.length ? Math.max(...exitFills.map((f) => f.createdAt ?? this.d.now())) : this.d.now();
     // Hold time as the exchange sees it: opening fill -> closing fill (both exchange timestamps when known).
     const entryFillTimes = entryFills.map((f) => f.createdAt).filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
     const holdMs = Math.max(0, exitTs - (entryFillTimes.length ? Math.min(...entryFillTimes) : t.entryTs));
     // With real exit fills the commission is whatever the exchange charged (authoritative, may be 0 under the
     // Scalper Offer). Without them the estimate uses the live fee configuration at the observed hold time.
-    const exitEstimate = calcFee({ price: exitPrice, contracts, contractValue: spec.contractValue, role: 'taker', isExit: true, holdMs }, this.feeConfig());
-    const exitFee = exitFills.length ? usd(exitFills.reduce((s, f) => s + f.commission, 0)) : exitEstimate.total;
+    // Without exchange-confirmed commissions the estimate is deliberately pessimistic: the FULL closing fee, no waiver,
+    // no "fee saved" claimed.
+    const exitEstimate = calcFee({ price: exitPrice, contracts, contractValue: spec.contractValue, role: 'taker', isExit: true, holdMs }, feeConfigFrom(settings, spec, { waiverOverride: false }));
+    const exitFee = exitFeesKnown ? usd(exitFills.reduce((s, f) => s + f.commission, 0)) : exitEstimate.total;
     const gross = grossPnl(t.side, entryPrice, exitPrice, contracts, spec.contractValue);
     const meta = t.meta ?? {};
     const funding = Number(meta.fundingEstimate ?? 0);
@@ -682,8 +721,7 @@ export class LiveExecutor {
     // Closing fee the Scalper Offer saved: only claimed when the exchange really charged nothing on an eligible close.
     const windowMs = settings.execution.exitFeeWaiver.withinMinutes * 60_000;
     let exitFeeSaved = 0;
-    if (exitFills.length === 0) exitFeeSaved = exitEstimate.saved ?? 0;
-    else if (exitFee <= WAIVER_FEE_TOLERANCE_USD && settings.execution.exitFeeWaiver.enabled && reason !== 'liquidation' && holdMs <= windowMs) {
+    if (exitFeesKnown && exitFee <= WAIVER_FEE_TOLERANCE_USD && settings.execution.exitFeeWaiver.enabled && reason !== 'liquidation' && holdMs <= windowMs) {
       const full = feeConfigFrom(settings, spec, { waiverOverride: false });
       exitFeeSaved = exitFills.reduce((sum, f) => sum + calcFee({ price: f.price, contracts: f.size, contractValue: spec.contractValue, role: f.role === 'maker' ? 'maker' : 'taker' }, full).total, 0);
     }
@@ -697,13 +735,13 @@ export class LiveExecutor {
     for (const f of fills) {
       if (entryFills.includes(f) || exitFills.includes(f)) await this.d.repos.saveFill({ fillId: f.id, orderId: f.orderId, tradeId: t.id, side: f.side, size: f.size, price: f.price, role: f.role, commission: f.commission, ts: f.createdAt });
     }
-    await this.d.repos.saveClosedTrade(trade, { ...meta, finalizedBy: 'exchange_sync', commissionSource: exitFills.length ? 'exchange_fills' : 'estimate' });
+    await this.d.repos.saveClosedTrade(trade, { ...meta, finalizedBy: 'exchange_sync', commissionSource: exitFeesKnown ? 'exchange_fills' : 'estimate_full_fee' });
     this.noteClosed(trade);
     this.d.logger.info('live trade finalised from exchange state', { id: t.id, reason, net });
     // Scalper Offer: check the assumption against the real closing commission, and flag a late (fee-paying) close.
     // Bookkeeping only: a failure here must never leave the executor believing a closed position is still open.
     try {
-      if (exitFills.length > 0) await this.verifyWaiver(trade, exitFee, reason);
+      if (exitFeesKnown) await this.verifyWaiver(trade, exitFee, reason);
       if (this.waiverEffective() && reason !== 'liquidation' && holdMs > windowMs) {
         await this.attend(`Live trade ${t.id} was held ${(holdMs / 60_000).toFixed(1)} min: closed after the Scalper window - closing fee will apply. Check why the exit was delayed.`);
       }
@@ -923,6 +961,19 @@ export class LiveExecutor {
   // ======================================================================================
   // Monitoring and exits
   // ======================================================================================
+
+  /**
+   * Time exit that does not depend on market-data quotes: called from the periodic housekeeping so a dead feed can not
+   * leave a position open past the Scalper window (where the closing fee would return). Reduce-only market close.
+   */
+  timeBackstop(): Promise<void> {
+    return this.run(async () => {
+      const p = this.position;
+      if (!p || p.closing) return;
+      const heldMs = this.d.now() - p.entryTs;
+      if (heldMs >= effectiveMaxHoldMs(this.d.getSettings(), this.waiverEffective())) await this.closeInner(p, 'time_exit');
+    });
+  }
 
   /** Called on quotes (throttled by the caller). Applies time exit, break-even tightening and software backstops. */
   monitor(quote: Quote): Promise<void> {

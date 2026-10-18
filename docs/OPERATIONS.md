@@ -10,7 +10,7 @@
 | `ip_not_whitelisted_for_api_key` | Whitelist the backend's static IP on the Delta key (the error context shows the IP the exchange saw). |
 | `SignatureExpired` | Server clock drifting: enable NTP. The client also learns the offset from response headers. |
 | 429 / rate limited | Automatic back-off; the limiter budgets 70 % of Delta's 20,000/5-min quota. |
-| Rotate API key | Strategy & Risk → Exchange connection → Replace key (password re-entry). Live is disarmed; re-run activation. If the new key is for another Delta account or environment, also press **Reset & re-check…** on the Scalper Offer card (the check result is stored once per database, not per key). |
+| Rotate API key | Strategy & Risk → Exchange connection → Replace key (password re-entry). Live is disarmed; re-run activation. The Scalper Offer check result is bound to environment + key, so a different Delta account or environment starts again as *unverified* automatically. |
 | Reset demo | Demo tab → *Reset account* (history is kept, the epoch restarts). |
 | Drawdown limit hit | Entries stay blocked until you reset the baseline (Live: *reset* next to the drawdown baseline; Demo: reset account) — an intentional manual decision. |
 | Attention item "Live trade … closed after the Scalper window - closing fee will apply" | A live position was held longer than the 30-minute window (the 28.5-min time exit kept failing, or the exchange was slow or down), so Delta charges the closing fee. Nothing is wrong with the offer: this close is recorded in *Last check* with "a closing fee expected" and is not counted for or against the offer. Find out why the exit was delayed (reduce-only close rejected, rate limit, outage; see the logs) and **Acknowledge**. P&L already uses the real fee. |

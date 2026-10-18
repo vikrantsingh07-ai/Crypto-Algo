@@ -299,29 +299,29 @@ export function evaluateEntryRisk(input: RiskInput): RiskDecision {
     const marginUsd = notional / settings.position.leverage;
     const liq = estimateLiquidationPrice(side, entry, settings.position.leverage, spec.maintenanceMarginPct);
     const liqDist = Math.abs(entry - liq);
-    const fees = feeConfigFrom(settings, spec, input.feeOptions);
-    const economics = estimateEconomics(
-      {
-        side,
-        entryPrice: entry + dir * settings.execution.simSlippageUsd,
-        targetPrice,
-        stopPrice,
-        contracts,
-        contractValue: spec.contractValue,
-        entryRole: 'taker',
-        targetRole: settings.exits.takeProfitOrderType === 'limit' ? 'maker' : 'taker',
-        stopRole: 'taker',
-        stopSlippageUsd: settings.execution.simStopSlippageUsd,
-      },
-      fees,
-    );
+    const econInput = {
+      side,
+      entryPrice: entry + dir * settings.execution.simSlippageUsd,
+      targetPrice,
+      stopPrice,
+      contracts,
+      contractValue: spec.contractValue,
+      entryRole: 'taker' as const,
+      targetRole: settings.exits.takeProfitOrderType === 'limit' ? ('maker' as const) : ('taker' as const),
+      stopRole: 'taker' as const,
+      stopSlippageUsd: settings.execution.simStopSlippageUsd,
+    };
+    // Reward gates use the effective fee model (Scalper Offer assumed or observed). The per-trade LOSS CAP is a
+    // safety limit, so it is always evaluated on full fees: an assumed waiver must never make a risk ceiling looser.
+    const economics = estimateEconomics(econInput, feeConfigFrom(settings, spec, input.feeOptions));
+    const worstCase = estimateEconomics(econInput, feeConfigFrom(settings, spec, { ...input.feeOptions, waiverOverride: false }));
     plan = { side, contracts, qtyEth, entryPrice: entry, stopPrice, targetPrice, marginUsd, liquidationPrice: liq, liquidationDistanceUsd: liqDist, economics };
 
     add({
       code: 'PER_TRADE_RISK',
-      ok: economics.riskNet <= L.perTradeRiskUsd,
-      message: `Net loss at stop (incl. fees) ${economics.riskNet.toFixed(2)} vs limit ${L.perTradeRiskUsd}`,
-      value: Number(economics.riskNet.toFixed(4)),
+      ok: worstCase.riskNet <= L.perTradeRiskUsd,
+      message: `Net loss at stop (incl. full fees, no waiver assumed) ${worstCase.riskNet.toFixed(2)} vs limit ${L.perTradeRiskUsd}`,
+      value: Number(worstCase.riskNet.toFixed(4)),
       limit: L.perTradeRiskUsd,
     });
     add({

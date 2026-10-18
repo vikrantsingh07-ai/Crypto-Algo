@@ -53,10 +53,12 @@ The offer cannot be read through the Delta API. So it is an **assumption**, cont
 |---|---|
 | **Demo** | Simulated. An exit whose hold time (exit fill time − entry fill time) is ≤ 30 min pays no closing fee, for any exit reason (take-profit, stop, break-even stop, time exit). The entry fee is always charged. Each trade records `exitFeeSaved`, shown on the dashboard ("exit FREE (saved $x)") and summed as `feesSavedUsd`. |
 | **Backtest / walk-forward** | Same code as Demo. The waiver assumption is printed with every result (`assumptions`, and `summary.scalperOffer`). |
-| **Pre-trade gates** (Demo and Live) | Net reward, net reward:risk and per-trade risk are computed with an entry fee only. In Live this holds only while the status is not `not_applied` (below). |
-| **Live P&L** | **Always the commission the exchange reports on the fills** (authoritative). The estimate is used only when the closing fills could not be fetched, and the trade is then marked `commissionSource: estimate`. |
-| **Live time exit** | 28.5 min, measured from the bot's own entry timestamp (taken when the entry order is sent, i.e. slightly *before* the fill). A failed close is retried on every monitor tick. |
+| **Pre-trade gates** (Demo and Live) | Net reward and net reward:risk are computed with an entry fee only. In Live this holds only while the status is not `not_applied` (below). The per-trade **loss cap** (`PER_TRADE_RISK`) is always evaluated on full fees: an assumed waiver never makes a risk limit looser. |
+| **Live P&L** | **Always the commission the exchange reports on the fills** (authoritative). The estimate is used only when the closing fills could not be fetched, and the trade is then marked `commissionSource: estimate_full_fee` and uses the full closing fee (no waiver, no saving claimed). A fill whose payload has no usable commission number is treated as unknown, never as 0. |
+| **Live time exit** | 28.5 min, measured from the bot's own entry timestamp (taken when the entry order is sent, i.e. slightly *before* the fill). A failed close is retried on every monitor tick, and the 5-second housekeeping pass also enforces it when the quote feed is down. |
 | **Live fallback** | If the exchange charges a closing fee on an eligible close, or the setting is OFF: entry gates use full-fee economics and the time exit goes back to 30 min. |
+
+Not eligible, in Demo/backtests and in the Live estimates: **liquidations** (the closing fee is always charged) and any **extra transaction tax** you configured (`otherTaxRate`, a separate levy). 
 
 Hold time everywhere is measured **entry fill → exit fill** (exchange timestamps in Live; falls back to the bot's own timestamp when entry fills are unknown). The bot opens one position per signal and never adds to it, so only the first-fill case occurs. A hold of exactly 30:00.000 counts as inside; one millisecond later is not (core `calcFee`, and the mock exchange).
 

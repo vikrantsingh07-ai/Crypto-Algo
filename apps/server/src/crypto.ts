@@ -23,6 +23,9 @@ export function parseEncryptionKey(raw: string): Buffer {
       `CREDENTIAL_ENCRYPTION_KEY is too short (${secret.length} characters): use base64 of 32 random bytes or any random secret of at least 32 characters (for example a 64-character hex string)`,
     );
   }
+  if (new Set(secret).size < 10) {
+    throw new Error('CREDENTIAL_ENCRYPTION_KEY looks too repetitive to be a random secret (fewer than 10 distinct characters): generate a random one');
+  }
   return Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), KEY_DERIVATION_INFO, 32));
 }
 

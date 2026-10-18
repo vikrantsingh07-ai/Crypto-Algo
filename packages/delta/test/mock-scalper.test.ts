@@ -121,3 +121,21 @@ describe('mock exchange: Scalper Offer model', () => {
     expect(ex.positionOpenedAt).toBe(clock.t); // the new short starts its own window
   });
 });
+
+
+import { mapFill } from '../src/mappers';
+
+describe('mapFill commission', () => {
+  const base = { id: 1, order_id: 2, product_id: 3, product_symbol: 'ETHUSD', side: 'sell', size: '20', price: '3004', role: 'taker', fill_type: 'normal', created_at: '2026-06-01T10:10:00Z' };
+  it('flags a missing, blank or non-numeric commission as unknown instead of reading it as 0', () => {
+    for (const commission of [undefined, null, '', '  ', 'n/a']) {
+      const f = mapFill({ ...base, commission });
+      expect(f.commissionKnown).toBe(false);
+      expect(f.commission).toBe(0);
+    }
+  });
+  it('an explicit zero is a known zero; settling-asset commission wins over the plain field', () => {
+    expect(mapFill({ ...base, commission: '0' })).toMatchObject({ commission: 0, commissionKnown: true });
+    expect(mapFill({ ...base, commission: '0.4', meta_data: { total_commission_in_settling_asset: '0.35' } })).toMatchObject({ commission: 0.35, commissionKnown: true });
+  });
+});

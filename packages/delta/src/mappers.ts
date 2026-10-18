@@ -144,7 +144,15 @@ export function mapPosition(p: any): ExchangePosition {
   };
 }
 
+/** A commission figure counts as known only when the payload carries a finite number (a blank is not "0"). */
+function commissionOf(f: any): { value: number; known: boolean } {
+  const raw = f.meta_data?.total_commission_in_settling_asset ?? f.commission;
+  const known = raw !== undefined && raw !== null && String(raw).trim() !== '' && Number.isFinite(Number(raw));
+  return { value: known ? Number(raw) : 0, known };
+}
+
 export function mapFill(f: any): ExchangeFill {
+  const commission = commissionOf(f);
   return {
     id: String(f.id),
     orderId: String(f.order_id),
@@ -154,7 +162,8 @@ export function mapFill(f: any): ExchangeFill {
     size: num(f.size),
     price: num(f.price),
     role: f.role,
-    commission: num(f.meta_data?.total_commission_in_settling_asset ?? f.commission),
+    commission: commission.value,
+    commissionKnown: commission.known,
     fillType: String(f.fill_type ?? 'normal'),
     createdAt: parseTime(f.created_at),
     settlingAsset: f.settling_asset_symbol ?? null,

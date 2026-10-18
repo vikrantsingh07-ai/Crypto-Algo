@@ -283,7 +283,7 @@ export function marketExit(pos: OpenPosition, tick: Tick, reason: ExitReason, ct
 export function closePosition(pos: OpenPosition, exit: ExitDecision, exitTs: number, ctx: PaperContext): ClosedTrade {
   const holdMs = exitTs - pos.entryTs;
   const exitLeg = calcFee(
-    { price: exit.price, contracts: pos.contracts, contractValue: pos.contractValue, role: exit.role, isExit: true, holdMs },
+    { price: exit.price, contracts: pos.contracts, contractValue: pos.contractValue, role: exit.role, isExit: true, holdMs, liquidation: exit.reason === 'liquidation' },
     ctx.fees,
   );
   const pnl = calcPnl(
@@ -296,6 +296,7 @@ export function closePosition(pos: OpenPosition, exit: ExitDecision, exitTs: num
       entryRole: 'taker',
       exitRole: exit.role,
       holdMs,
+      liquidation: exit.reason === 'liquidation',
       funding: pos.fundingAccrued,
       slippageCost: pos.entrySlippageCost,
       actualEntryFee: pos.entryFee.total,

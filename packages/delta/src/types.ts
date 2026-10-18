@@ -54,8 +54,10 @@ export interface ExchangeFill {
   size: number;
   price: number;
   role: 'maker' | 'taker' | string;
-  /** Commission charged in the settling asset (authoritative fee). */
+  /** Commission charged in the settling asset (authoritative fee). 0 when `commissionKnown` is false. */
   commission: number;
+  /** False when the exchange payload carried no usable commission figure: a blank is NOT evidence of a free fill. */
+  commissionKnown?: boolean;
   fillType: string;
   createdAt: number | null;
   settlingAsset: string | null;

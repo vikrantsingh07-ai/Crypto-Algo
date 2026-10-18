@@ -58,7 +58,8 @@ describe('CREDENTIAL_ENCRYPTION_KEY', () => {
   it('derives from any other secret of at least 32 characters, and different secrets give different keys', () => {
     const a = parseEncryptionKey('correct horse battery staple, 4 words!');
     const b = parseEncryptionKey('correct horse battery staple, 5 words!');
-    const edge = parseEncryptionKey('z'.repeat(32));
+    const edge = parseEncryptionKey('abcdefghijklmnopqrstuvwxyz012345'); // exactly 32 characters
+    expect(() => parseEncryptionKey('z'.repeat(32))).toThrow(/repetitive/);
     expect([a.length, b.length, edge.length]).toEqual([32, 32, 32]);
     expect(a.equals(b)).toBe(false);
   });

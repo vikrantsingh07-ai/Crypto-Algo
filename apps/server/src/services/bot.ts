@@ -126,6 +126,13 @@ export class Bot {
       await this.save({ ...this.state, liveArmed: false, mode: 'demo', attention: [...this.state.attention, 'API credentials changed; Live trading disarmed'] });
       await d.repos.audit({ actor: 'system', action: 'live_disarmed', details: { reason: 'credentials changed' } });
     }
+    if (d.cfg.LIVE_HARD_DISABLE && (this.state.liveArmed || this.state.mode === 'live')) {
+      // The deployer lock wins over the database: an already-armed Live is switched off at startup. An open real
+      // position keeps being managed (stops, time exit, reconciliation); only NEW entries are impossible.
+      d.logger.warn('LIVE_HARD_DISABLE is set: disarming live execution');
+      await this.save({ ...this.state, liveArmed: false, mode: 'demo', attention: [...this.state.attention, 'LIVE_HARD_DISABLE is set on this deployment; Live trading was disarmed'] });
+      await d.repos.audit({ actor: 'system', action: 'live_disarmed', details: { reason: 'LIVE_HARD_DISABLE' } });
+    }
     if (d.creds.status().configured) await d.live.reconcile().catch((e) => d.logger.warn('initial reconcile failed', { error: (e as Error).message }));
     this.privateStream.start();
     await d.feed.start();
@@ -164,6 +171,8 @@ export class Bot {
     await this.reload();
     const s = d.getSettings();
     const st = this.state;
+    // The time exit must not depend on the quote feed being alive.
+    if (this.workerActive && d.live.position) await d.live.timeBackstop().catch((e) => d.logger.error('time backstop failed', { error: (e as Error).message }));
 
     if (d.creds.status().configured) {
       // Fast cadence while live is armed / a real position exists; a slower account refresh keeps the

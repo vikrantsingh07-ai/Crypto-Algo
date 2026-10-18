@@ -530,3 +530,66 @@ describe('backtest assumptions (S6)', () => {
     expect(on.summary.fullSample.fees).toBeLessThan(off.summary.fullSample.fees);
   });
 });
+
+
+describe('review fixes: blank commissions, account binding, quote-independent time exit', () => {
+  it('a fill without a usable commission figure is NOT read as a free close: full-fee estimate, nothing confirmed, nothing saved', async () => {
+    await boot(true);
+    await arm(h);
+    await enter();
+    advance(10 * MIN);
+    const real = h.rt.client.getFills.bind(h.rt.client);
+    (h.rt.client as any).getFills = async (...a: Parameters<typeof real>) => {
+      const res = await real(...a);
+      return { ...res, fills: res.fills.map((f) => ({ ...f, commission: 0, commissionKnown: false })) };
+    };
+    await h.rt.live.closeNow('manual');
+    const t = await lastTrade();
+    expect(t.exitFee).toBeGreaterThan(0.3); // pessimistic full closing fee, not 0
+    expect(t.exitFeeSaved ?? 0).toBe(0);
+    expect(h.rt.live.waiver.status).toBe('unverified');
+    expect(h.rt.live.waiver.confirmedCount).toBe(0);
+    expect(h.rt.live.waiver.lastCheck).toBeNull();
+  });
+
+  it('the verdict belongs to one exchange account: a different environment / API key starts again as unverified', async () => {
+    await boot(true);
+    await arm(h);
+    await enter();
+    advance(10 * MIN);
+    await h.rt.live.closeNow('manual');
+    expect(h.rt.live.waiver.status).toBe('confirmed');
+    expect(h.rt.live.waiver.scope).toMatch(/\|/); // bound to environment|key fingerprint when the doc was written
+    // same account: nothing changes
+    expect(h.rt.live.waiverEffective()).toBe(true);
+    expect(h.rt.live.waiver.status).toBe('confirmed');
+    // swap the account behind the executor
+    (h.rt.live as any).d.waiverScope = () => 'some-other-environment|ffffffff';
+    expect(h.rt.live.waiverEffective()).toBe(true); // enabled in settings, but no longer "confirmed"
+    expect(h.rt.live.waiver).toMatchObject({ status: 'unverified', confirmedCount: 0, lastCheck: null, scope: 'some-other-environment|ffffffff' });
+    await new Promise((r) => setTimeout(r, 20));
+    const audit = await h.rt.repos.listAudit(10, 'scalper_offer_status_reset');
+    expect(audit.some((a: any) => JSON.stringify(a.details).includes('environment or API key changed'))).toBe(true);
+    // an unknown scope (credentials not loaded yet) never wipes a verdict
+    h.rt.live.waiver = { ...h.rt.live.waiver, status: 'confirmed', confirmedCount: 2 };
+    (h.rt.live as any).d.waiverScope = () => null;
+    h.rt.live.waiverEffective();
+    expect(h.rt.live.waiver.status).toBe('confirmed');
+  });
+
+  it('timeBackstop closes at the clamped time exit without any market-data quote, and does nothing earlier', async () => {
+    await boot(true);
+    await arm(h);
+    await enter();
+    advance(20 * MIN);
+    await h.rt.live.timeBackstop();
+    expect(h.rt.live.position).not.toBeNull(); // 20 min: still inside the hold
+    h.clock.t += 8.6 * MIN; // 28.6 min, and NO fresh quote is pushed: the feed is "dead"
+    await h.rt.live.timeBackstop();
+    expect(h.rt.live.position).toBeNull();
+    const t = await lastTrade();
+    expect(t.exitReason).toBe('time_exit');
+    expect(t.exitFee).toBe(0);
+    expect(t.holdMs!).toBeLessThan(30 * MIN);
+  });
+});

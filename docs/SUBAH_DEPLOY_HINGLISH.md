@@ -32,7 +32,7 @@ Render ke paid plan ke liye card lagta hai (international payments on hone chahi
 
 ### Shuru karne se pehle: yeh sab ek jagah copy karna padega
 
-Phone ka password manager ya Notes use karo. Retype mat karo, copy-paste karo.
+Phone ka password manager use karo (Notes / screenshot / WhatsApp me secrets mat rakho). Retype mat karo, copy-paste karo.
 
 | Kya | Kahan banta hai | Kahan paste hota hai |
 |---|---|---|
@@ -56,7 +56,7 @@ Dhyan do: `render.yaml` aur `Dockerfile` aapki GitHub repo ke jis branch par hai
    `postgresql://neondb_owner:PASSWORD@ep-xxxx.ap-southeast-1.aws.neon.tech/neondb?sslmode=require`
    - `?sslmode=require` waise hi rehne do. Isse connection encrypted rehta hai. Is wajah se `DATABASE_SSL` set karne ki zaroorat nahi.
    - Kuch edit mat karo. Sirf URL copy karo: `psql` shabd, quotes ya space nahi. (Galti se quotes ya space aa jayein to server unhe hata deta hai. Poora `psql '...'` command paste hua to server start hi nahi hota aur saaf error line deta hai.)
-6. Is string ko apne password manager / Notes me rakh lo. Isme database ka password hai: kisi ko mat bhejo.
+6. Is string ko apne password manager me rakh lo (Notes ya screenshot me nahi). Isme database ka password hai: kisi ko mat bhejo.
 
 Supabase ya Render Postgres bhi chalenge (koi bhi `postgresql://` string), par humne sirf Neon ke liye likha hai. Supabase ke certificate ke liye shayad `DATABASE_SSL=no-verify` chahiye. Yeh bhi test nahi hua.
 

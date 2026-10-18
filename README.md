@@ -63,7 +63,7 @@ Closing the browser never stops the bot. The worker is independent of any dashbo
 | **Scalper Offer check** | The offer only changes cost *estimates*; no gate is loosened and no order path is added. Live P&L is always the exchange-reported commission. Every live close is checked against the zero-closing-fee assumption; if the exchange charges a closing fee on an eligible trade, Live switches to full-fee economics (it trades *less*) until an admin resets it. |
 | **Secrets** | API keys live only on the backend: env vars or AES-256-GCM encrypted in the DB. Never returned by any API, never logged, never in the browser/Vercel. Delta keys have no withdrawal permission; you grant *Trading* only and whitelist the server IP. |
 | **Auth** | bcrypt passwords, signed short-lived sessions in an `httpOnly; SameSite=Strict` cookie, `admin`/`viewer` roles, login lockout, per-route rate limits, CSRF checks, strict CSP, audit log (append-only at the DB level). Optional proxy shared secret. |
-| **Deployment lock** | `LIVE_HARD_DISABLE=true` makes activation impossible regardless of the dashboard. |
+| **Deployment lock** | `LIVE_HARD_DISABLE=true` makes activation impossible regardless of the dashboard, refuses new entries even if the database says Live is armed, and disarms an armed Live at startup (an open real position keeps being managed). |
 
 ## Quick start (local)
 
@@ -132,7 +132,7 @@ At $3,000 a taker leg costs $0.354. A $4 move on 0.20 ETH is $0.80 gross: a take
 | Where | Behaviour |
 |---|---|
 | Demo, backtests | Assume the offer while `execution.exitFeeWaiver.enabled` (default **on**): a trade closed within 30 minutes pays only the entry fee. The time exit fires at **28.5 min** (30 min minus a 90 s safety margin) so even the backstop exit is inside the window. |
-| Pre-trade gates | Net reward, net reward:risk and per-trade risk use the entry fee only, while the assumption stands. |
+| Pre-trade gates | Net reward and net reward:risk use the entry fee only, while the assumption stands. The per-trade **loss cap** always uses full fees (no waiver assumed), so an assumption never loosens a risk limit. |
 | Live P&L | **Always the commission Delta reports on the fills.** Never the assumption. |
 | Live verification | Each live close with known closing fills is compared with the assumption. Status: `unverified` → `confirmed` (closing commission ≤ $0.001 on an eligible close) or `NOT APPLIED` (charged). `NOT APPLIED` switches Live to full-fee economics and the unclamped 30-min time exit, raises an attention item and an audit row, and stays until an admin presses **Reset & re-check…** (`POST /api/live/waiver/reset`) or changes the waiver settings. |
 | Switch off | Strategy & Risk → *Assume the Scalper Offer* OFF counts the full closing fee everywhere. Do this if your account has not joined. |
@@ -189,7 +189,7 @@ The full version is in [`docs/GO_LIVE_CHECKLIST.md`](docs/GO_LIVE_CHECKLIST.md).
 
 ```bash
 npm run typecheck     # all workspaces
-npm test              # vitest run: core + delta + server (258 tests in 12 files: core 60, delta 63, server 135)
+npm test              # vitest run: core + delta + server (274 tests in 13 files: core 64, delta 65, server 145)
 npx vitest run apps/server/test/scalper.test.ts packages/delta/test/mock-scalper.test.ts   # Scalper Offer only
 npm run build         # server bundle + Next.js production build
 ```
@@ -232,7 +232,7 @@ Backend environment: see [`.env.example`](.env.example) (every variable document
 ## What was and was not verified
 
 **Done and verified here**
-* Full test suite green (258 tests in 12 files, `npx vitest run`, run after the Scalper Offer work) and typechecking of all workspaces; production builds of the server bundle and the Next.js app; boot of the production bundle (refuses to start without secrets; behaves correctly when Delta is unreachable; health, proxy-secret and login rules).
+* Full test suite green (274 tests in 13 files, `npx vitest run`, run after the Scalper Offer work) and typechecking of all workspaces; production builds of the server bundle and the Next.js app; boot of the production bundle (refuses to start without secrets; behaves correctly when Delta is unreachable; health, proxy-secret and login rules).
 * The dashboard exercised in a real browser (login via the proxy, Demo/Live/Settings/Analytics, the whole activation wizard against the mock, kill switch, mobile/dark layout). The Scalper Offer screens were checked at 390 px and 1360 px in light and dark, but against mocked API responses built from the real fee engine, not against the final server.
 * Request signing byte-compatible with Delta's official Python client; endpoints, parameters, WebSocket URLs/channels/auth, rate-limit weights and error codes taken from Delta's official documentation source (github.com/delta-exchange/slate).
 * The Scalper Offer logic (assumption, 28.5-min time exit, verification, fallback to full fees, reset) against the **local mock exchange** and unit tests only.
@@ -249,13 +249,15 @@ Backend environment: see [`.env.example`](.env.example) (every variable document
 * ETH perpetuals only, linear (vanilla) contracts, isolated margin, one position at a time by default; cross/portfolio margin, options, and inverse contracts are not supported (inverse is rejected).
 * Funding in Demo uses the feed's rate or a configured fallback; INR figures use a configured rate (no live FX feed).
 * A software backstop exists behind the exchange-side stop, but if the exchange, your host and your network all fail simultaneously, only the exchange-side stop protects you. Delta's "dead man's switch" is deliberately not used because it cancels *all* orders, including protective stops.
+* The Docker image installs its production dependencies from `package.json` ranges rather than the lockfile (it was never built here: no Docker daemon in the sandbox); pin it before relying on it for real money.
 * Extra transaction taxes (e.g. TDS) are configurable (`otherTaxRate`, default 0) but not assumed; income-tax treatment of profits is out of scope.
 * **Scalper Offer:**
   * It is an assumption. Enrolment cannot be read through the API, so the bot cannot know whether your account joined; it learns only from real closes, and the first eligible live close is what exposes a wrong assumption (at the cost of one closing fee).
   * Hold time is measured from the entry fill to the closing fill using exchange timestamps (falling back to the bot's own clock when entry fills are unknown). The 90 s safety margin covers latency; if a close is delayed beyond the window the closing fee is paid. A close within 5 s of the cut-off is treated as inconclusive. How Delta itself measures the window (first or last fill, rounding) is unknown.
-  * Verification needs the closing fills. If they cannot be fetched the trade is finalised from an estimate and does not count towards the check.
+  * Verification needs the closing fills with a usable commission figure. If they cannot be fetched, or a fill carries no commission number (a blank is not read as "free"), the trade is finalised from a pessimistic full-fee estimate, no saving is claimed, and it does not count towards the check.
   * A fee that Delta charges and later credits back would be read as "charged" and flip the status to `NOT APPLIED`.
-  * The status is stored once per database, not per Delta environment or API key. Press *Reset & re-check…* after switching environment, key or account. Standby instances do not refresh it.
+  * The status is bound to the Delta environment and API key it was observed with: switching either returns it to *unverified* automatically (audited). Standby instances do not refresh it.
+  * Liquidations and any extra transaction tax you configure (`otherTaxRate`) are never treated as waived.
   * The offer can change or end without notice. If ETHUSD's window is 15 minutes, `withinMinutes` must be changed by hand (and the break-even time lowered).
   * The testnet may not have the offer, so a `NOT APPLIED` there is not evidence about production.
   * The Diwali Scalper Offer (BTCUSD only) is not modelled.

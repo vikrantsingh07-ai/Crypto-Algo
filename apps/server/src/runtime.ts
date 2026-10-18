@@ -132,6 +132,8 @@ export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): 
     },
     feedHealthy: () => feed.health().mode !== 'down',
     hasCredentials: () => creds.status().configured,
+    hardDisabled: () => cfg.LIVE_HARD_DISABLE,
+    waiverScope: () => (creds.fingerprint() ? `${endpoints.label}|${creds.fingerprint()}` : null),
     now,
     sleep: ov.sleep,
     logger: (logger as any).child?.('live') ?? logger,

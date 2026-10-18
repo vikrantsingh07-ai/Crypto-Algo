@@ -130,7 +130,7 @@ export const SettingsSchema = z.object({
        * Delta may change or end the offer at any time. The offer is not visible through the public API, so:
        *  - Demo / backtests / pre-trade economics assume the waiver while `enabled`;
        *  - Live P&L always uses the fees the exchange actually charged, and the first eligible live closes are
-       *    checked against the assumption (see `waiverStatus` in the live snapshot). If the exchange charged a
+       *    checked against the assumption (see `live.scalper` in the dashboard state). If the exchange charged a
        *    closing fee on an eligible trade the bot falls back to no-waiver economics automatically.
        * Turn this off if your Delta account has not joined the offer.
        */
@@ -314,6 +314,12 @@ export function validateSettings(settings: Settings, spec: ContractSpec, ctx: Va
     }
     if (!w.clampTimeExit && settings.exits.maxHoldMinutes >= w.withinMinutes) {
       warn('execution.exitFeeWaiver.clampTimeExit', 'A time exit at or after the waiver window pays the full closing fee, but the estimates still assume it is free.');
+    }
+    if (w.safetyMarginSeconds >= w.withinMinutes * 60) {
+      err('execution.exitFeeWaiver.safetyMarginSeconds', 'The safety margin must be shorter than the waiver window.');
+    }
+    if (w.withinMinutes > 30) {
+      warn('execution.exitFeeWaiver.withinMinutes', 'Delta publishes a 30-minute window for BTCUSD and ETHUSD (15 minutes for other futures). A longer window makes the fee estimates too optimistic.');
     }
     if (w.safetyMarginSeconds < 20) {
       warn('execution.exitFeeWaiver.safetyMarginSeconds', 'A very small safety margin risks the exit fill landing after the 30-minute cut-off and paying the closing fee.');

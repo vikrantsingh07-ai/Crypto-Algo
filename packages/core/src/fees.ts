@@ -56,6 +56,8 @@ export interface FeeInput {
   /** Set for exit legs so the optional waiver can be evaluated. */
   isExit?: boolean;
   holdMs?: number;
+  /** Liquidations are not eligible for the Scalper Offer: the closing fee is always charged. */
+  liquidation?: boolean;
 }
 
 export function notionalOf(price: number, contracts: number, contractValue: number): number {
@@ -67,14 +69,17 @@ export function calcFee(input: FeeInput, cfg: FeeConfig): FeeBreakdown {
   const rate = input.role === 'maker' ? cfg.makerRate : cfg.takerRate;
   const waived =
     !!input.isExit &&
+    !input.liquidation &&
     cfg.waiver.enabled &&
     input.holdMs !== undefined &&
     input.holdMs <= cfg.waiver.withinMinutes * 60_000;
   const fullCommission = notional * rate;
-  const fullTotal = fullCommission * (1 + cfg.gstRate) + notional * (cfg.otherTaxRate ?? 0);
   const commission = waived ? 0 : fullCommission;
   const gst = commission * cfg.gstRate;
-  const tax = waived ? 0 : notional * (cfg.otherTaxRate ?? 0);
+  // The offer waives the exchange's closing fee (commission + its GST). Any extra transaction tax the operator
+  // configured is a separate levy and is never assumed to be waived.
+  const tax = notional * (cfg.otherTaxRate ?? 0);
+  const fullTotal = fullCommission * (1 + cfg.gstRate);
   return {
     notional: round(notional, 8),
     commission: round(commission, 8),
@@ -106,6 +111,8 @@ export interface PnlInput {
   funding?: number;
   /** Memo: slippage already embedded in the fill prices, in USD. */
   slippageCost?: number;
+  /** The exit was a liquidation (never eligible for the Scalper Offer). */
+  liquidation?: boolean;
   /** Override with exchange-reported fees (LIVE). */
   actualEntryFee?: number;
   actualExitFee?: number;
@@ -130,6 +137,7 @@ export function calcPnl(input: PnlInput, cfg: FeeConfig): PnlResult {
         role: input.exitRole,
         isExit: true,
         holdMs: input.holdMs,
+        liquidation: input.liquidation,
       },
       cfg,
     ).total;

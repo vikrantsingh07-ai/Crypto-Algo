@@ -159,6 +159,34 @@ describe('fee engine', () => {
   });
 });
 
+describe('Scalper Offer exclusions', () => {
+  it('never waives a liquidation, and never waives a separately configured transaction tax', () => {
+    const exit = { price: 3004, contracts: 20, contractValue: 0.01, role: 'taker' as const, isExit: true, holdMs: 60_000 };
+    const liq = calcFee({ ...exit, liquidation: true }, cfg());
+    expect(liq.waived).toBe(false);
+    expect(liq.total).toBeCloseTo(3004 * 0.2 * 0.0005 * 1.18, 8);
+    expect(liq.saved).toBe(0);
+    const pnl = calcPnl({ side: 'long', entryPrice: 3000, exitPrice: 2950, contracts: 20, contractValue: 0.01, entryRole: 'taker', exitRole: 'taker', holdMs: 60_000, liquidation: true }, cfg());
+    expect(pnl.exitFee).toBeGreaterThan(0);
+
+    const taxed = feeConfigFrom(settings({ execution: { otherTaxRate: 0.001 } }), spec());
+    const w = calcFee(exit, taxed);
+    expect(w.waived).toBe(true);
+    expect(w.commission).toBe(0);
+    expect(w.gst).toBe(0);
+    expect(w.tax).toBeCloseTo(600.8 * 0.001, 8); // the levy is still charged
+    expect(w.total).toBeCloseTo(w.tax, 8);
+    expect(w.saved).toBeCloseTo(600.8 * 0.0005 * 1.18, 8); // saved = exchange fee only
+  });
+
+  it('settings validation: safety margin must be shorter than the window; a window longer than Delta publishes is flagged', () => {
+    const bad = validateSettings(settings({ execution: { exitFeeWaiver: { withinMinutes: 1, safetyMarginSeconds: 90 } }, exits: { maxHoldMinutes: 1, breakevenAfterMinutes: 1 } }), spec(), { referencePrice: 3000 });
+    expect(bad.some((i) => i.path === 'execution.exitFeeWaiver.safetyMarginSeconds' && i.severity === 'error')).toBe(true);
+    const long = validateSettings(settings({ execution: { exitFeeWaiver: { withinMinutes: 60 } } }), spec(), { referencePrice: 3000 });
+    expect(long.some((i) => i.path === 'execution.exitFeeWaiver.withinMinutes' && i.severity === 'warning')).toBe(true);
+  });
+});
+
 describe('time exit and the Scalper Offer window', () => {
   it('is on by default: 30-minute window, 90 s safety margin, time exit clamped to 28.5 min', () => {
     const s = settings();

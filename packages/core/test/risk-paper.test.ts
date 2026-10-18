@@ -144,6 +144,17 @@ describe('risk manager', () => {
     expect(off.plan!.economics.netRewardRisk).toBeLessThan(d.plan!.economics.netRewardRisk);
   });
 
+  it('the per-trade LOSS cap is always checked on full fees: an assumed waiver never makes it looser', () => {
+    // $3 stop + 0.25 slippage on 0.2 ETH: net loss ~1.00 with the waiver, ~1.36 with full fees.
+    const tight = settings({ limits: { perTradeRiskUsd: 1.2, minNetRewardRisk: 0, minExpectedNetRewardUsd: 0 } });
+    const d = decide({}, tight, signal({ targetMoveUsd: 5, stopMoveUsd: 3 }));
+    expect(d.plan!.economics.riskNet).toBeLessThan(1.2); // the waived estimate would have passed ...
+    expect(failed(d)).toContain('PER_TRADE_RISK'); // ... but the loss cap uses the worst case
+    // the live fallback (waiver not applied) gives the same verdict
+    const live = evaluateEntryRisk({ settings: tight, spec: spec(), state: baseState(), signal: signal({ targetMoveUsd: 5, stopMoveUsd: 3 }), quote, feeOptions: { waiverOverride: false } });
+    expect(live.checks.filter((c) => !c.ok).map((c) => c.code)).toContain('PER_TRADE_RISK');
+  });
+
   it('requires free margin and a liquidation buffer; leverage never overrides them', () => {
     expect(failed(decide({ availableMarginUsd: 10, equityUsd: 100 }))).toContain('FREE_MARGIN');
     // 100x: liquidation distance ~ 0.5% of 3000 = $15, stop $6*3 = $18 needed.
@@ -255,6 +266,15 @@ describe('paper execution simulator', () => {
     // The same stop exit filled at 30:01 is outside the offer: the closing fee is charged.
     const late = closePosition(stop.position, stop.exit!, T0 + 30 * 60_000 + 1000, ctx);
     expect(late.exitFee).toBeGreaterThan(0);
+  });
+
+  it('a liquidation pays the full closing fee even inside the Scalper window (not eligible)', () => {
+    const pos = open();
+    const r = stepPosition(pos, tick(2900, 2900.1, T0 + 2 * 60_000, { low: 2800, high: 3000 }), ctx);
+    expect(r.exit?.reason).toBe('liquidation');
+    const trade = closePosition(r.position, r.exit!, T0 + 2 * 60_000, ctx);
+    expect(trade.exitFee).toBeGreaterThan(0);
+    expect(trade.exitFeeSaved).toBe(0);
   });
 
   it('tightens the stop to a fee-covering break-even after 15 minutes when in profit (no waiver: needs ~$3.5)', () => {

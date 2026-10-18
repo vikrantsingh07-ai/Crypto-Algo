@@ -23,8 +23,18 @@ const MAX_USER_FAILURES = 20;
 const LOCK_MS = 15 * 60_000;
 /** Same cost as `npm run hash-password`, used when a plain ADMIN_PASSWORD has to be hashed at startup in production. */
 const PROD_BCRYPT_COST = 12;
-// bcrypt hash of a random string: used to keep response time constant for unknown usernames
-const DUMMY_HASH = bcrypt.hashSync(randomId('dummy', 8), 8);
+// bcrypt hash of a random string with the SAME cost as the real hashes: keeps the response time of an unknown username
+// indistinguishable from a wrong password (a cheaper dummy would let an attacker enumerate usernames by timing).
+const dummyHashes = new Map<number, string>();
+function dummyHashFor(realHash: string | undefined): string {
+  const cost = Number(/^\$2[aby]\$(\d{2})\$/.exec(realHash ?? '')?.[1] ?? 10);
+  let h = dummyHashes.get(cost);
+  if (!h) {
+    h = bcrypt.hashSync(randomId('dummy', 8), cost);
+    dummyHashes.set(cost, h);
+  }
+  return h;
+}
 
 /**
  * Authentication and session handling.
@@ -73,7 +83,7 @@ export class AuthService {
       return { ok: false, status: 423, error: 'Too many failed attempts. Try again later.' };
     }
     const user = this.users.find((u) => safeEqual(u.username.toLowerCase(), username.toLowerCase()));
-    const valid = await bcrypt.compare(password, user?.hash ?? DUMMY_HASH);
+    const valid = await bcrypt.compare(password, user?.hash ?? dummyHashFor(this.users[0]?.hash));
     if (!user || !valid) {
       const prev = rec && (rec.lockedUntil === 0 || rec.lockedUntil > this.now()) ? rec.count : 0; // an expired lock starts fresh
       const next = { count: prev + 1, lockedUntil: 0 };
@@ -118,6 +128,6 @@ export class AuthService {
   /** Step-up authentication for sensitive actions (live activation, credentials). */
   async verifyPassword(username: string, password: string): Promise<boolean> {
     const user = this.users.find((u) => u.username === username);
-    return bcrypt.compare(password, user?.hash ?? DUMMY_HASH).then((ok) => !!user && ok);
+    return bcrypt.compare(password, user?.hash ?? dummyHashFor(this.users[0]?.hash)).then((ok) => !!user && ok);
   }
 }

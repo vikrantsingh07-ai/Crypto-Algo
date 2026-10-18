@@ -13,7 +13,7 @@ Do not skip items. Tick each one. Nothing in this project has been run against t
 - [ ] Activation wizard passes all checks; phrase `ENABLE TESTNET TRADING`. The *Scalper Offer* row is information only, never a tick.
 - [ ] Confirm on the exchange UI: contract `ETHUSD` value/tick/leverage/fees match the dashboard's "Contract" row.
 - [ ] Observe a full trade: IOC entry fill, **stop and target both resting** (reduce-only), exit by target / stop / time exit; compare fees and P&L with the exchange statement (this settles the GST / commission question).
-- [ ] Note what the testnet charged on a close inside 28.5 min. The offer may not exist on the testnet; if the dashboard turns *NOT APPLIED* there, that says nothing about production. **The status is stored once per database, so before the first production trade press Live → Scalper Offer → Reset & re-check…** (step C).
+- [ ] Note what the testnet charged on a close inside 28.5 min. The offer may not exist on the testnet; if the dashboard turns *NOT APPLIED* there, that says nothing about production. **The verdict is bound to environment + API key, so switching to the production key starts it again as *unverified*; confirm that in step C.**
 - [ ] Restart the backend mid-position: it adopts the position and keeps both orders; no duplicate entry.
 - [ ] Press the **kill switch** with a position open: it flattens; entries stay blocked; release does not re-arm.
 - [ ] Switch Live → Demo with a position open and confirm your chosen policy behaves as documented.
@@ -25,7 +25,7 @@ Do not skip items. Tick each one. Nothing in this project has been run against t
 - [ ] **If you cannot or did not join:** switch *Assume the Scalper Offer* OFF (Strategy & Risk) **before** activation. All estimates then include the closing fee and the time exit stays at the configured 30 min.
 - [ ] The Diwali Scalper Offer (opening-fee voucher) is BTCUSD only. It does not apply to this ETHUSD bot, is not modelled, and must not be counted in your expectations.
 - [ ] New production key (Trading only, IP whitelisted). `DELTA_ENV=production`. Test connection.
-- [ ] Live → Scalper Offer card: after the testnet rehearsal or any earlier run, press **Reset & re-check…** so the status reads *Assumed — unverified* for the production account.
+- [ ] Live → Scalper Offer card: confirm the status reads *Assumed — unverified* for the production account (it resets automatically when the environment or key changes; if it still shows an old verdict, press **Reset & re-check…**).
 - [ ] Fund only what you can afford to lose. Set `perTradeRiskUsd`, `dailyLossLimitUsd`, `maxDrawdownPct` conservatively (defaults: $2.50 / $6 / 15 %).
 - [ ] Settings validate with **no warnings you do not understand** (liquidation buffer at 50x is tight: ≈ 1.5 % of price; the time-exit clamp to 28.5 min is expected while the offer is assumed).
 - [ ] Live Trading → Enable Live Trading → read every check (the *Scalper Offer (zero closing fee)* line says whether it is assumed, confirmed or not applied, and the max holding time shows 28.5 min) → tick the five acknowledgements → password + phrase. Changing any waiver setting afterwards invalidates the reviewed token.
