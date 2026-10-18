@@ -41,7 +41,7 @@ Phone ka password manager use karo (Notes / screenshot / WhatsApp me secrets mat
 | Backend URL (`https://....onrender.com`) | Step B ke baad | Vercel `BACKEND_URL` |
 | `PROXY_SHARED_SECRET` (Render khud banata hai) | Step B ke baad Render ke Environment tab me | Vercel `PROXY_SHARED_SECRET` (bilkul same) |
 
-Dhyan do: `render.yaml` aur `Dockerfile` aapki GitHub repo ke jis branch par hain wahi Render ko dikhana hoga. Agar yeh files abhi kisi dusre branch par hain, to pehle GitHub app me pull request merge karo (ya Blueprint screen par woh branch chuno).
+Dhyan do: `render.yaml` aur `Dockerfile` GitHub repo ki `main` branch par hain: Render/Vercel dono me branch `main` hi chuno (kaam wali branch `ccr-12ad71d8-4mu4gv` ke saath `main` same commit par hai).
 
 ## 2. Step A: Postgres (Neon free)
 
@@ -114,8 +114,9 @@ Repo me `railway.json` hai (Dockerfile builder, health check `/api/health`, 1 re
 2. "Add New..." par tap karo, "Project" chuno. "Import Git Repository" me apni repo (Crypto-Algo) ke saamne "Import" dabao. GitHub access maange to do.
 3. "Configure Project" screen par:
    - **Framework Preset:** Next.js (apne aap aa jaana chahiye).
+   - **Production Branch:** `main` (Project banne ke baad: Settings, Git, Production Branch. GitHub par bhi Settings, Branches, Default branch ko `main` kar do, taaki Vercel/Render apne aap `main` uthayen).
    - **Root Directory:** "Edit" par tap karo aur `apps/web` chuno. Continue. (Yeh sabse zaroori step hai. Ye na ho to build fail hoga.)
-   - Build and Output Settings ko haath mat lagao: `apps/web/vercel.json` install aur build command khud set karta hai (`cd ../.. && npm ci --include=dev` aur `next build`).
+   - Build and Output Settings ko haath mat lagao: `apps/web/vercel.json` install aur build command khud set karta hai (`cd ../.. && npm ci --include=dev` aur `npm run build`).
    - **Node.js Version:** jo default ho woh theek hai (22.x ya naya; Next.js 16 ko 20.9 ya upar chahiye). Agar chunna pade to 22.x.
    - **Environment Variables** (neeche wali do, dono):
 
@@ -202,7 +203,7 @@ Live trading default me band hai aur band hi rehni chahiye. Pehle yeh sab:
 Yeh guide aur files likhne wale ne kuch bhi asli Render, Vercel, Neon, Railway, Fly ya Delta par deploy ya run nahi kiya.
 
 Jo sandbox me asli me chala aur dekha gaya:
-- Saaf clone (git ke tracked + untracked files) me `npm ci`, phir `apps/web` me `next build` (VERCEL=1 ke saath, `BACKEND_URL` / `PROXY_SHARED_SECRET` ke bina bhi) pass hua. Dev-dependencies ke bina (`NODE_ENV=production` install) build fail hota hai, isliye `vercel.json` ka install command `--include=dev` use karta hai.
+- Saaf clone (git ke tracked + untracked files) me `npm ci`, phir `apps/web` me `npm run build` (VERCEL=1 ke saath, `BACKEND_URL` / `PROXY_SHARED_SECRET` ke bina bhi) pass hua. Dev-dependencies ke bina (`NODE_ENV=production` install) build fail hota hai, isliye `vercel.json` ka install command `--include=dev` use karta hai.
 - Backend ka production-mode boot (embedded PGlite, Delta unreachable): process zinda raha, `/api/health` ne `ok:true` diya, market data "down" dikha (crash nahi), proxy secret ke bina login 403, sahi secret + `ADMIN_PASSWORD` se login 200, Live disabled (preflight fail, `liveArmed:false`), logs me secret nahi mila, PID se band kiya.
 - Galat config par saaf "Configuration error: ..." line aur exit code 1; galat database host par "Hint: ..." line.
 - Config tests (`apps/server/test/config.test.ts`) pass aur `tsc` clean hai. Docker Dockerfile ke steps haath se (Node 22) dohraye gaye: build, runtime manifest, `npm install --omit=dev`, boot.

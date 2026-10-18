@@ -71,7 +71,7 @@ Requirements: Node ≥ 22 (root `package.json` `engines`), npm. No database or D
 
 ```bash
 git clone https://github.com/vikrantsingh07-ai/Crypto-Algo && cd Crypto-Algo
-git checkout ccr-12ad71d8-4mu4gv        # the branch this was built on
+git checkout main                        # (the work branch is ccr-12ad71d8-4mu4gv; main equals it after the merge)
 npm install
 npm test                                 # unit + integration tests
 ```
