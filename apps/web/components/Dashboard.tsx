@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { ago, num } from '@/lib/format';
+import { scalperView } from '@/lib/scalper';
 import type { BotState, Me } from '@/lib/types';
 import ActivationWizard from './ActivationWizard';
 import AnalyticsPanel from './AnalyticsPanel';
@@ -137,6 +138,10 @@ export default function Dashboard() {
   const apiDot = !cred.configured ? 'warn' : state.live.account.error ? 'crit' : state.live.account.fetchedAt ? 'good' : 'warn';
   const apiLabel = !cred.configured ? 'not configured' : state.live.account.error ? 'error' : state.live.account.fetchedAt ? 'connected' : 'connecting';
   const q = state.feed.quote;
+  const sv = scalperView(state, 'live');
+  const lsc = state.live.scalper;
+  const scDot = !sv.assumed ? '' : lsc?.status === 'not_applied' ? 'crit' : lsc?.status === 'confirmed' ? 'good' : 'warn';
+  const scLabel = !sv.assumed ? 'off · full closing fee' : lsc?.status === 'not_applied' ? 'NOT APPLIED · full fees' : lsc?.status === 'confirmed' ? `confirmed ×${lsc.confirmedCount}` : `assumed · no closing fee ≤ ${sv.windowMin} min`;
 
   const actions: Actions = {
     isAdmin: !!isAdmin,
@@ -192,20 +197,21 @@ export default function Dashboard() {
           <span><i className={`dot ${feedDot}`} />Market data: <b>{feedLabel}</b>{state.feed.ageMs !== null && ` · last tick ${ago(q?.ts, state.now)}`}</span>
           <span><i className={`dot ${apiDot}`} />Exchange account API: <b>{apiLabel}</b>{cred.fingerprint && ` · ${cred.keyHint}`}</span>
           <span><i className={`dot ${state.live.reconciled ? 'good' : cred.configured ? 'warn' : ''}`} />Reconciliation: <b>{state.live.reconciled ? 'in sync' : cred.configured ? 'not in sync' : 'n/a'}</b></span>
+          <span><i className={`dot ${scDot}`} />Scalper Offer: <b>{scLabel}</b></span>
           <span className="muted">{state.deployment.realMoney ? 'Environment: production' : 'Environment: sandbox/testnet'}</span>
         </div>
 
         <div className="tabs" role="tablist">
           {(
             [
-              ['demo', 'Demo Trading'],
-              ['live', 'Live Trading'],
-              ['settings', 'Strategy & Risk'],
-              ['analytics', 'Analytics'],
-            ] as [Tab, string][]
-          ).map(([k, t]) => (
-            <button key={k} role="tab" aria-selected={tab === k} className={`tab ${k === 'live' ? 'livetab' : ''}`} onClick={() => setTab(k)}>
-              {t}{k === 'live' && (armed ? ' ●' : '')}
+              ['demo', 'Demo Trading', 'Demo'],
+              ['live', 'Live Trading', 'Live'],
+              ['settings', 'Strategy & Risk', 'Strategy'],
+              ['analytics', 'Analytics', 'Analytics'],
+            ] as [Tab, string, string][]
+          ).map(([k, t, short]) => (
+            <button key={k} role="tab" aria-selected={tab === k} aria-label={t} className={`tab ${k === 'live' ? 'livetab' : ''}`} onClick={() => setTab(k)}>
+              <span className="long">{t}</span><span className="short">{short}</span>{k === 'live' && (armed ? ' ●' : '')}
             </button>
           ))}
         </div>

@@ -34,6 +34,10 @@ describe('fresh installation is DEMO with live disabled', () => {
     expect(s.targets.targetMoveMaxUsd).toBe(6);
     expect(s.exits.maxHoldMinutes).toBe(30);
     expect(s.limits.maxTradesPer24h).toBe(10);
+    // Scalper Offer (no closing fee within 30 min) is assumed by default, unverified, with the time exit clamped before the window ends
+    expect(s.execution.exitFeeWaiver).toEqual({ enabled: true, withinMinutes: 30, safetyMarginSeconds: 90, clampTimeExit: true });
+    expect(h.rt.live.waiver).toMatchObject({ status: 'unverified', confirmedCount: 0, lastCheck: null });
+    expect(h.rt.live.scalperView()).toMatchObject({ assumed: true, effective: true, effectiveMaxHoldMinutes: 28.5 });
   });
 
   it('cannot place a real order while disarmed: entry refused and ZERO orders reach the exchange', async () => {
@@ -224,7 +228,7 @@ describe('armed live execution', () => {
     expect(rows[0].status).toBe('failed');
   });
 
-  it('monitor: time exit after 30 minutes closes with a reduce-only market order', async () => {
+  it('monitor: a time exit (past the clamped 28.5 min limit) closes with a reduce-only market order', async () => {
     await enter();
     h.clock.t += 31 * 60_000;
     h.ex.setClock(() => h.clock.t);

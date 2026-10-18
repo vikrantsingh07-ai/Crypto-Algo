@@ -92,6 +92,8 @@ export interface LiveSummary {
   peakEquityUsd: number | null;
   baselineEquityUsd: number | null;
   consecutiveLosses: number;
+  /** Scalper Offer verification (absent on an older server). */
+  scalper?: LiveScalper;
   credentials: { configured: boolean; source: 'environment' | 'database' | null; env: string; fingerprint: string | null; keyHint: string | null; canStoreInDatabase: boolean; updatedAt: string | null };
   risk: RiskSummary;
   clockOffsetMs: number;
@@ -106,14 +108,55 @@ export interface EconRow {
   netRewardRisk: number;
   requiredWinRate: number;
 }
+/** Delta Scalper Offer (closing-fee waiver): what the bot assumes for estimates, as reported by the server. */
+export interface ScalperEconomics {
+  /** settings.execution.exitFeeWaiver.enabled */
+  assumed: boolean;
+  /** Demo / backtest / pre-trade economics use the waiver. */
+  effective: boolean;
+  /** Live pre-trade economics use the waiver (false once the exchange has shown closing fees being charged). */
+  liveEffective: boolean;
+  windowMinutes: number;
+  safetyMarginSeconds: number;
+  effectiveMaxHoldMinutes: number;
+}
+export type ScalperStatus = 'unverified' | 'confirmed' | 'not_applied';
+export interface LiveScalperCheck {
+  tradeId: string;
+  at: number;
+  holdMs: number;
+  expectedWaived: boolean;
+  exitFeeUsd: number;
+}
+/** The assumption is checked against the exchange-reported commission of eligible live closes. */
+export interface LiveScalper {
+  assumed: boolean;
+  effective: boolean;
+  status: ScalperStatus;
+  confirmedCount: number;
+  lastCheck: LiveScalperCheck | null;
+  windowMinutes: number;
+  safetyMarginSeconds: number;
+  effectiveMaxHoldMinutes: number;
+  note: string;
+}
 export interface Economics {
   referencePrice: number;
   contracts: number;
   stopUsd: number;
+  /** Rows use the basis in `scalper` (waiver applied when `scalper.effective`). */
   makerTarget: EconRow[];
   takerTarget: EconRow[];
+  /** Same targets with the full closing fee (no waiver). Absent on an older server. */
+  makerTargetNoWaiver?: EconRow[];
+  takerTargetNoWaiver?: EconRow[];
   breakevenMoveMakerExitUsd: number;
   breakevenMoveTakerExitUsd: number;
+  /** Break-even move with a maker exit and the full closing fee. */
+  breakevenMoveNoWaiverMakerExitUsd?: number;
+  /** Break-even move when only the opening fee is paid. */
+  breakevenMoveWaivedUsd?: number;
+  scalper?: ScalperEconomics;
   rates: { maker: number; taker: number; gst: number };
   verifiedSpec: boolean;
 }
@@ -157,10 +200,16 @@ export interface TradeRow {
   exitReason: string | null;
   grossPnl: number | null;
   fees: number | null;
+  /** Split of `fees`; absent on rows stored before the Scalper Offer was modelled. */
+  entryFee?: number | null;
+  exitFee?: number | null;
+  /** Closing fee the Scalper Offer saved (assumed in Demo; estimated in Live). */
+  exitFeeSaved?: number | null;
   netPnl: number | null;
   netPnlInr: number | null;
   holdMs: number | null;
   regime: string | null;
+  meta?: Record<string, any> | null;
 }
 
 export interface GroupStats {
@@ -181,6 +230,8 @@ export interface Metrics {
   winRateCI95: { low: number; high: number };
   grossPnl: number;
   fees: number;
+  /** Closing fees the Scalper Offer saved (absent on an older server). */
+  feesSavedUsd?: number;
   funding: number;
   slippageCost: number;
   netPnl: number;

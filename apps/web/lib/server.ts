@@ -32,7 +32,7 @@ const ALLOWED = [
   /^mode$/,
   /^kill-switch$/,
   /^attention\/clear$/,
-  /^live\/(preflight|activate|reconcile|close-position|reset-baseline)$/,
+  /^live\/(preflight|activate|reconcile|close-position|reset-baseline|waiver\/reset)$/,
   /^demo\/(reset|close)$/,
   /^audit$/,
 ];

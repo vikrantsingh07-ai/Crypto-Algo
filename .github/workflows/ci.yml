@@ -2,6 +2,15 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,6 +24,53 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build -w @cryptoalgo/server
+      # Same build the Vercel project runs (apps/web). The URL is a placeholder; nothing is contacted at build time.
       - run: npm run build -w @cryptoalgo/web
         env:
           BACKEND_URL: http://localhost:8080
+      # Boots the built backend exactly like a host would (NODE_ENV=production, embedded database, throwaway
+      # secrets) and checks health plus the proxy-secret rule. Delta being reachable or not does not matter here.
+      - name: Production boot smoke test
+        run: |
+          set -u
+          export NODE_ENV=production PORT=8201 DATA_DIR="$RUNNER_TEMP/smoke-data" MARKET_DATA_SOURCE=delta
+          export SESSION_SECRET="$(openssl rand -hex 32)" CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+          export PROXY_SHARED_SECRET="$(openssl rand -hex 24)" ADMIN_PASSWORD="ci-$(openssl rand -hex 12)"
+          node apps/server/dist/main.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          pid=$!
+          healthy=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8201/api/health 2>/dev/null | grep -q '"ok":true'; then healthy=1; break; fi
+            sleep 1
+          done
+          code_without_secret=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8201/api/auth/login -H 'content-type: application/json' -d '{"username":"admin","password":"x"}')
+          login=$(curl -s -X POST http://127.0.0.1:8201/api/auth/login -H 'content-type: application/json' -H "x-proxy-secret: $PROXY_SHARED_SECRET" -d "{\"username\":\"admin\",\"password\":\"$ADMIN_PASSWORD\"}")
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          if [ "$healthy" != 1 ]; then echo "backend did not become healthy"; cat "$RUNNER_TEMP/server.log"; exit 1; fi
+          if [ "$code_without_secret" != 403 ]; then echo "login without the proxy secret returned $code_without_secret, expected 403"; exit 1; fi
+          echo "$login" | grep -q '"token"' || { echo "login with the proxy secret and ADMIN_PASSWORD failed"; cat "$RUNNER_TEMP/server.log"; exit 1; }
+          echo "boot smoke test passed"
+
+  # Builds the image the hosts build from ./Dockerfile and runs it (the sandbox the author used has no Docker daemon).
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t cryptoalgo-server .
+      - name: Run image and check health
+        run: |
+          set -u
+          docker run -d --name ca -p 8201:8080 \
+            -e SESSION_SECRET="$(openssl rand -hex 32)" -e CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)" \
+            -e PROXY_SHARED_SECRET="$(openssl rand -hex 24)" -e ADMIN_PASSWORD="ci-$(openssl rand -hex 12)" \
+            cryptoalgo-server
+          healthy=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8201/api/health 2>/dev/null | grep -q '"ok":true'; then healthy=1; break; fi
+            sleep 1
+          done
+          if [ "$healthy" != 1 ]; then docker logs ca; docker rm -f ca; echo "container did not become healthy"; exit 1; fi
+          docker rm -f ca
+          echo "docker smoke test passed"

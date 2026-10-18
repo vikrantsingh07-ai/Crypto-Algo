@@ -14,6 +14,7 @@ RUN npm run build -w @cryptoalgo/server
 RUN node -e "const p=require('./apps/server/package.json');for(const k of Object.keys(p.dependencies))if(k.startsWith('@cryptoalgo/'))delete p.dependencies[k];delete p.devDependencies;p.scripts={start:'node main.js'};require('fs').writeFileSync('apps/server/dist/package.json',JSON.stringify(p,null,2))"
 
 FROM node:22-slim AS runtime
+# PORT is only a default: Render / Railway inject their own PORT at runtime and the server and the health check follow it.
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0

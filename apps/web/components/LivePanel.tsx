@@ -2,14 +2,85 @@
 
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
-import { ago, duration, inr, num, usd } from '@/lib/format';
+import { ago, duration, inr, num, timeShort, usd } from '@/lib/format';
+import { minutes, scalperView } from '@/lib/scalper';
 import type { BotState, TradeRow } from '@/lib/types';
 import type { Actions } from './Dashboard';
 import { TradesTable } from './DemoPanel';
 import { Meter } from './charts';
+import { ExitFeeClock, OfferTerms, ScalperPill, useServerNow } from './scalper';
 import { Card, Checks, Pnl, Stat, Tag } from './ui';
 
 const STALE_ACCOUNT_MS = 60_000;
+
+/**
+ * Delta Scalper Offer on the LIVE side. The offer cannot be read through the Delta API, so the bot assumes it and
+ * checks the assumption against the commission the exchange reports on the first eligible closes.
+ */
+function ScalperOfferCard({ state, actions }: { state: BotState; actions: Actions }) {
+  const [confirming, setConfirming] = useState(false);
+  const v = scalperView(state, 'live');
+  const sc = state.live.scalper;
+  const lc = sc?.lastCheck ?? null;
+  const matched = lc ? !lc.expectedWaived || lc.exitFeeUsd <= 1e-9 : null;
+
+  return (
+    <Card title="Scalper Offer — closing-fee waiver" hint={`Delta: close within ${v.windowMin} min and no closing fee is charged`} right={<Tag kind="real">Real fills</Tag>}>
+      <div className="pill-row"><ScalperPill v={v} live={sc} /></div>
+      <p className="sec" style={{ margin: '8px 0 10px', fontSize: 13 }}>
+        {!v.assumed ? (
+          <>The offer is switched off in settings, so every estimate counts the full closing fee. Turn it on under Strategy &amp; Risk only if your Delta account has joined the offer.</>
+        ) : sc?.status === 'not_applied' ? (
+          <><b>The exchange charged a closing fee on a trade the offer should have covered.</b> The bot now sizes and gates live entries with the full fee. Check on Delta that your account has joined the Scalper Offer, then reset the check.</>
+        ) : sc?.status === 'confirmed' ? (
+          <>Delta did not charge a closing fee on {sc.confirmedCount} eligible close{sc.confirmedCount === 1 ? '' : 's'} — the assumption holds so far. It keeps being checked; Delta may end the offer without notice.</>
+        ) : (
+          <>The offer is <b>assumed</b>: it cannot be read through the Delta API. The first eligible live closes are checked against what the exchange actually charges. Live P&amp;L always uses the exchange-reported fee.</>
+        )}
+      </p>
+      <table className="kv">
+        <tbody>
+          <tr><td className="sec">Assumed in settings</td><td className="num">{v.assumed ? 'ON' : 'OFF'}</td></tr>
+          <tr><td className="sec">Live pre-trade economics</td><td className="num">{v.effective ? <>closing fee <b>free</b> inside {v.windowMin} min</> : <b className={v.assumed ? 'bad' : undefined}>full closing fee counted</b>}</td></tr>
+          <tr><td className="sec">Time exit</td><td className="num">{minutes(v.effectiveMaxHoldMin)}{v.clamped ? ` (configured ${v.configuredMaxHoldMin}; ${v.marginSec} s margin before the ${v.windowMin}-min cut-off)` : ''}</td></tr>
+          <tr><td className="sec">Eligible closes confirmed</td><td className="num">{sc ? sc.confirmedCount : '—'}</td></tr>
+          <tr>
+            <td className="sec">Last check</td>
+            <td className="num">
+              {lc ? (
+                <>
+                  trade {lc.tradeId} · {timeShort(lc.at)} · held {duration(lc.holdMs)}
+                  <br />
+                  expected {lc.expectedWaived ? 'FREE' : 'a closing fee'} · exchange charged <b>{usd(lc.exitFeeUsd, 3)}</b> → <b className={matched ? 'good' : 'bad'}>{matched ? (lc.expectedWaived ? 'waived as expected' : 'as expected') : 'MISMATCH'}</b>
+                </>
+              ) : (
+                'none yet — waiting for an eligible close'
+              )}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      {sc?.note && <p className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>{sc.note}</p>}
+      {actions.isAdmin && (
+        <div style={{ marginTop: 10 }}>
+          {!confirming ? (
+            <button className="btn sm" onClick={() => setConfirming(true)}>Reset &amp; re-check…</button>
+          ) : (
+            <div className="confirm-box" role="alertdialog" aria-label="Reset Scalper Offer verification">
+              <b>Reset the Scalper Offer check to “unverified” and re-check?</b>
+              <div className="sec" style={{ fontSize: 12, margin: '4px 0 8px' }}>The bot assumes the offer again until your next eligible live closes are checked. Use this after you have joined the offer on Delta; the next eligible close is checked again. Nothing is traded by this.</div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn primary sm" onClick={async () => { const r = await actions.run('Reset check', () => api('POST', 'live/waiver/reset'), 'Scalper Offer check reset to unverified'); if (r !== undefined) setConfirming(false); }}>Yes, reset</button>
+                <button className="btn sm" onClick={() => setConfirming(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      <OfferTerms />
+    </Card>
+  );
+}
 
 export default function LivePanel({ state, actions }: { state: BotState; actions: Actions }) {
   const [rows, setRows] = useState<TradeRow[] | null>(null);
@@ -25,6 +96,8 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
   }, []);
 
   const L = state.live;
+  const v = scalperView(state, 'live');
+  const now = useServerNow(state.now);
   const a = L.account;
   const cred = L.credentials;
   const armed = state.liveArmed && state.mode === 'live';
@@ -52,6 +125,13 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
         {actions.isAdmin && !armed && <button className="btn primary" onClick={actions.openWizard} disabled={state.deployment.liveHardDisabled}>Enable Live Trading…</button>}
         {actions.isAdmin && armed && <button className="btn" onClick={actions.confirmDemoSwitch}>Switch to Demo</button>}
       </div>
+
+      {L.scalper?.status === 'not_applied' && v.assumed && (
+        <div className="banner crit" role="alert">
+          <span className="icon">✕</span>
+          <div><b>Scalper Offer NOT APPLIED.</b> Delta charged a closing fee on a trade the offer should have covered, so live entries are now sized and gated with <b>full-fee economics</b>. See the Scalper Offer card below.</div>
+        </div>
+      )}
 
       <div className="grid g-3">
         <Card title="Connection & API health" right={<Tag kind={apiOk ? 'good' : cred.configured ? 'crit' : 'warn'}>{apiOk ? 'connected' : cred.configured ? 'error' : 'not configured'}</Tag>}>
@@ -94,6 +174,10 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
         </Card>
       </div>
 
+      <div className="grid">
+        <ScalperOfferCard state={state} actions={actions} />
+      </div>
+
       <div className="grid g-2">
         <Card title="Exchange positions" hint="From the exchange (real-time position endpoint)" right={<Tag kind="real">Real</Tag>}>
           {!apiOk ? (
@@ -111,7 +195,17 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
                   <tr><td className="sec">Bot tracking</td><td className="num">{tracked ? `trade ${tracked.id} · stop ${num(tracked.stopPrice)} · target ${num(tracked.targetPrice)}` : <b className="bad">NOT tracked by the bot</b>}</td></tr>
                 </tbody>
               </table>
-              {tracked && <div style={{ marginTop: 8 }}><div className="sec" style={{ fontSize: 12 }}>Holding {duration(state.now - tracked.entryTs)} of {state.settings.exits.maxHoldMinutes}m</div><Meter value={state.now - tracked.entryTs} max={state.settings.exits.maxHoldMinutes * 60_000} label="Holding time" /></div>}
+              {tracked && (
+                <>
+                  <div style={{ marginTop: 10 }}>
+                    {v.effective ? <ExitFeeClock entryTs={tracked.entryTs} windowMin={v.windowMin} now={now} /> : <span className="fee-clock off">Closing fee is charged in full ({v.assumed ? 'offer not applied' : 'offer switched off'}).</span>}
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Holding · time exit at {minutes(v.effectiveMaxHoldMin)}</span><span className="tabnum">{duration(Math.max(0, now - tracked.entryTs))} / {duration(v.effectiveMaxHoldMin * 60_000)}</span></div>
+                    <Meter value={Math.max(0, now - tracked.entryTs)} max={v.effectiveMaxHoldMin * 60_000} label="Holding time" />
+                  </div>
+                </>
+              )}
               {actions.isAdmin && <button className="btn danger sm" style={{ marginTop: 10 }} onClick={() => window.confirm('Close the REAL position now with a reduce-only market order?') && actions.run('Close position', () => api('POST', 'live/close-position'), 'Close order sent')}>Close real position</button>}
             </>
           ) : (
@@ -148,14 +242,14 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
 
       <div className="grid g-4">
         <Stat label="Realised P&L (bot trades)" value={<Pnl v={realized} />} sub="net of actual exchange fees" />
-        <Stat label="Actual fees paid" value={usd(fees)} sub="from exchange fills" />
+        <Stat label="Actual fees paid" value={usd(fees)} sub="entry + closing, as the exchange charged" />
         <Stat label="Live trades · rolling 24h" value={`${L.risk.tradesLast24h} / ${state.settings.limits.maxTradesPer24h}`} />
         <Stat label="Consecutive losses" value={`${L.consecutiveLosses} / ${state.settings.limits.maxConsecutiveLosses}`} sub="circuit breaker pauses entries" />
       </div>
 
       <div className="grid">
         <Card title="Live trade history" hint="Real exchange trades only — demo trades are never shown here" right={<Tag kind="real">Real</Tag>}>
-          <TradesTable rows={rows} mode="live" />
+          <TradesTable rows={rows} mode="live" windowMin={v.windowMin} />
         </Card>
       </div>
 

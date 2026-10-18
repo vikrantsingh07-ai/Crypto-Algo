@@ -3,6 +3,7 @@ import {
   computeMetrics,
   deepMerge,
   drawdownSeries,
+  effectiveMaxHoldMs,
   estimateEconomics,
   feeConfigFrom,
   generateSyntheticCandles,
@@ -55,7 +56,7 @@ function trimMetrics(m: PerformanceMetrics) {
 }
 
 function tradeRows(trades: ClosedTrade[]) {
-  return trades.slice(-300).map((t) => ({ id: t.id, side: t.side, entryTs: t.entryTs, exitTs: t.exitTs, entryPrice: t.entryPrice, exitPrice: t.exitPrice, exitReason: t.exitReason, netPnl: t.netPnl, fees: t.fees, holdMs: t.holdMs, regime: t.regime }));
+  return trades.slice(-300).map((t) => ({ id: t.id, side: t.side, entryTs: t.entryTs, exitTs: t.exitTs, entryPrice: t.entryPrice, exitPrice: t.exitPrice, exitReason: t.exitReason, netPnl: t.netPnl, fees: t.fees, exitFee: t.exitFee, exitFeeSaved: t.exitFeeSaved ?? 0, holdMs: t.holdMs, regime: t.regime }));
 }
 
 /** Pure job: run a backtest or walk-forward evaluation on candles and return a serialisable report. */
@@ -67,12 +68,21 @@ export function runBacktestJob(candles: Candle[], settingsIn: Settings, spec: Co
 
   const refPrice = candles[candles.length - 1].c;
   const contracts = Math.round(settings.position.quantityEth / spec.contractValue);
+  const fees = feeConfigFrom(settings, spec);
   const economics = estimateEconomics(
     { side: 'long', entryPrice: refPrice, targetPrice: refPrice + settings.targets.targetMoveMinUsd, stopPrice: refPrice - settings.targets.stopLossMinUsd, contracts, contractValue: spec.contractValue, targetRole: settings.exits.takeProfitOrderType === 'limit' ? 'maker' : 'taker' },
-    feeConfigFrom(settings, spec),
+    fees,
   );
+  const waiver = settings.execution.exitFeeWaiver;
+  const scalperOffer = { enabled: waiver.enabled, windowMinutes: waiver.withinMinutes, effectiveMaxHoldMinutes: effectiveMaxHoldMs(settings, waiver.enabled) / 60_000 };
+  const diwali = 'The separate "Diwali Scalper Offer" (opening fee returned as a voucher, BTCUSD only) does not apply to this ETHUSD bot and is not modelled.';
+  const waiverNote = waiver.enabled
+    ? `Scalper Offer ASSUMED (operator-supplied terms, not verifiable through the API): an exit within ${waiver.withinMinutes} minutes of the entry pays no closing fee, so only the entry fee is paid. The time exit is clamped to ${scalperOffer.effectiveMaxHoldMinutes.toFixed(1)} min (window minus ${waiver.safetyMarginSeconds}s safety margin) so it is fee-free too; an exit later than the window would pay the full closing fee. The offer must be joined in the Delta account (liquidations are not eligible). ${diwali}`
+    : `Scalper Offer waiver is OFF: every exit pays its full maker/taker fee plus GST, and the time exit fires at ${scalperOffer.effectiveMaxHoldMinutes.toFixed(1)} min. ${diwali}`;
   const costNote = {
     referencePrice: refPrice,
+    entryFeeUsd: economics.entryFee,
+    exitFeeWaived: economics.exitFeeWaived,
     breakevenMoveUsd: economics.breakevenMoveUsd,
     roundTripFeeIfTargetUsd: economics.feeIfTarget,
     roundTripFeeIfStopUsd: economics.feeIfStop,
@@ -91,11 +101,14 @@ export function runBacktestJob(candles: Candle[], settingsIn: Settings, spec: Co
       'Signals use closed 1-minute candles only; entries fill at the next candle open plus spread and slippage.',
       `Entry/stop are taker orders; take-profit is a resting limit (maker) filled only when price trades through it (${settings.execution.tpFillModel}).`,
       'If stop and target fall inside one candle the stop is assumed to fill first.',
-      `Fees: maker ${(feeConfigFrom(settings, spec).makerRate * 100).toFixed(3)}% / taker ${(feeConfigFrom(settings, spec).takerRate * 100).toFixed(3)}% + ${(settings.execution.gstRate * 100).toFixed(0)}% GST. No exit-fee waiver is assumed unless enabled.`,
+      `Fees: maker ${(fees.makerRate * 100).toFixed(3)}% / taker ${(fees.takerRate * 100).toFixed(3)}% + ${(settings.execution.gstRate * 100).toFixed(0)}% GST on every leg that is charged.`,
+      waiverNote,
       'All risk limits (max 10 trades/24h, one position, daily loss, drawdown, consecutive losses, net reward:risk) are enforced as in live trading.',
       'Historical results do not predict future results; a small sample is not evidence of profitability.',
     ],
     costNote,
+    /** Machine-readable form of the Scalper Offer assumption above (`assumptions` stays a list of sentences). */
+    scalperOffer,
   };
 
   if (params.kind === 'walkforward') {
@@ -153,6 +166,7 @@ function pickSummary(m: PerformanceMetrics) {
     maxDrawdownPct: m.maxDrawdownPct,
     avgHoldMinutes: m.avgHoldMinutes,
     targetReachedPct: m.targetReachedPct,
+    feesSavedUsd: m.feesSavedUsd,
     takeProfitPct: m.takeProfitPct,
     stopLossPct: m.stopLossPct,
     timeExitPct: m.timeExitPct,

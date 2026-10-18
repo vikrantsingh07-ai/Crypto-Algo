@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, ApiError } from '@/lib/api';
-import { num, pct, usd } from '@/lib/format';
+import { DIWALI_NOTE, effectiveMaxHoldMinutes, minutes } from '@/lib/scalper';
 import type { BotState } from '@/lib/types';
 import type { Actions } from './Dashboard';
+import { FeeRealityCard } from './scalper';
 import { Card, Tag } from './ui';
 
 type FieldDef =
@@ -13,7 +14,34 @@ type FieldDef =
   | { path: string; label: string; type: 'bool'; help?: string }
   | { path: string; label: string; type: 'select'; options: [string, string][]; help?: string };
 
-const GROUPS: { title: string; hint?: string; fields: FieldDef[] }[] = [
+interface Group {
+  title: string;
+  hint?: ReactNode;
+  fields: FieldDef[];
+  /** Rendered under the fields, from the current (unsaved) draft. */
+  readout?: (draft: any) => ReactNode;
+}
+
+function WaiverReadout({ draft }: { draft: any }) {
+  const w = draft?.execution?.exitFeeWaiver;
+  const hold = Number(draft?.exits?.maxHoldMinutes);
+  if (!w || !Number.isFinite(hold)) return null;
+  if (!w.enabled) {
+    return <div className="note-box warn">Offer assumption is <b>OFF</b>: every estimate counts the full closing fee, and the time exit stays at {minutes(hold)}. Turn it ON only if your Delta account has joined the offer.</div>;
+  }
+  const eff = effectiveMaxHoldMinutes(draft, true);
+  const pastWindow = !w.clampTimeExit && hold >= Number(w.withinMinutes);
+  return (
+    <div className={`note-box ${pastWindow ? 'warn' : ''}`}>
+      {w.clampTimeExit
+        ? <>Time exit is clamped to <b>{minutes(eff)}</b> (window {w.withinMinutes} min − {w.safetyMarginSeconds} s margin){eff < hold ? <>, down from the {minutes(hold)} max hold</> : null}, so even a time exit is a free close.</>
+        : <>Time exit is <b>not clamped</b>: it fires at {minutes(hold)}.</>}
+      {pastWindow && <> <b>That is at or after the {w.withinMinutes}-min window, so a time exit would pay the full closing fee while estimates still assume it is free.</b></>}
+    </div>
+  );
+}
+
+const GROUPS: Group[] = [
   {
     title: 'Instrument & position',
     hint: 'Validated against the exchange contract: quantity must be a whole number of contracts; leverage ≤ the exchange maximum.',
@@ -39,11 +67,29 @@ const GROUPS: { title: string; hint?: string; fields: FieldDef[] }[] = [
   {
     title: 'Time exit policy',
     fields: [
-      { path: 'exits.maxHoldMinutes', label: 'Max holding time (min)', type: 'number', step: 1, min: 1, max: 240, help: 'Hard backstop: market close at this time' },
-      { path: 'exits.timeExitPolicy', label: 'If target not reached', type: 'select', options: [['breakeven_then_close', 'Tighten stop to break-even, then close at limit'], ['close_at_market', 'Close at the time limit']] },
+      { path: 'exits.maxHoldMinutes', label: 'Max holding time (min)', type: 'number', step: 1, min: 1, max: 240, help: 'Hard backstop: market close at this time. While the Scalper Offer is assumed it is shortened to the window minus the safety margin (see below).' },
+      { path: 'exits.timeExitPolicy', label: 'If target not reached', type: 'select', options: [['breakeven_then_close', 'Break-even stop, then close'], ['close_at_market', 'Close at the time limit']] },
       { path: 'exits.breakevenAfterMinutes', label: 'Break-even stop after (min)', type: 'number', step: 1, min: 1 },
       { path: 'exits.takeProfitOrderType', label: 'Take-profit order', type: 'select', options: [['limit', 'Resting limit (maker fee)'], ['market', 'Market (taker fee)']] },
     ],
+  },
+  {
+    title: 'Delta Scalper Offer (closing-fee waiver)',
+    hint: (
+      <>
+        <b>Close within 30 minutes and Delta charges no closing fee</b> (BTCUSD and ETHUSD; 15 min for other futures); the opening fee is still paid. <b>Turn this OFF if your Delta account has not joined the offer</b> (trades taken before joining are not eligible).
+        To stay inside the window the time exit is clamped to window − safety margin (28.5 min by default).
+        <div style={{ marginTop: 4 }}>The offer cannot be read through the Delta API: Demo, backtests and pre-trade checks <i>assume</i> it while this is ON, Live P&amp;L always uses the fee the exchange actually charges, and the assumption is checked against your first eligible live closes.</div>
+        <div style={{ marginTop: 4 }}>{DIWALI_NOTE}</div>
+      </>
+    ),
+    fields: [
+      { path: 'execution.exitFeeWaiver.enabled', label: 'Assume the Scalper Offer (no closing fee inside the window)', type: 'bool', help: 'OFF = count the full closing fee everywhere' },
+      { path: 'execution.exitFeeWaiver.withinMinutes', label: 'Close-within window (min)', type: 'number', step: 1, min: 1, max: 1440, help: '30 for ETHUSD / BTCUSD, 15 for other futures' },
+      { path: 'execution.exitFeeWaiver.safetyMarginSeconds', label: 'Safety margin (s)', type: 'number', step: 5, min: 0, max: 600, help: 'Time exit fires this long before the window ends so a slow fill cannot land after the cut-off' },
+      { path: 'execution.exitFeeWaiver.clampTimeExit', label: 'Clamp the time exit to stay inside the window', type: 'bool', help: 'Max holding time becomes window − margin (28.5 min) while the offer is assumed' },
+    ],
+    readout: (d) => <WaiverReadout draft={d} />,
   },
   {
     title: 'Risk limits',
@@ -97,14 +143,12 @@ const GROUPS: { title: string; hint?: string; fields: FieldDef[] }[] = [
   },
   {
     title: 'Fees & simulation assumptions',
-    hint: 'Maker/taker rates default to the exchange product values. No exit-fee waiver is assumed unless you enable it.',
+    hint: 'Maker/taker rates default to the exchange product values. The closing-fee waiver is set in its own section above.',
     fields: [
       { path: 'execution.makerFeeRate', label: 'Maker fee override (fraction)', type: 'number', step: 0.0001, min: 0, nullable: true, help: 'blank = exchange value' },
       { path: 'execution.takerFeeRate', label: 'Taker fee override (fraction)', type: 'number', step: 0.0001, min: 0, nullable: true, help: 'blank = exchange value' },
       { path: 'execution.gstRate', label: 'GST on fees (fraction)', type: 'number', step: 0.01, min: 0, max: 1 },
       { path: 'execution.otherTaxRate', label: 'Other tax per leg (fraction of notional)', type: 'number', step: 0.0001, min: 0, max: 0.05, help: '0 unless your statements show one' },
-      { path: 'execution.exitFeeWaiver.enabled', label: 'Assume exit-fee waiver', type: 'bool', help: 'Only if your fee statement shows it' },
-      { path: 'execution.exitFeeWaiver.withinMinutes', label: 'Waiver window (min)', type: 'number', step: 1, min: 1 },
       { path: 'execution.simSlippageUsd', label: 'Simulated slippage ($)', type: 'number', step: 0.05, min: 0 },
       { path: 'execution.simStopSlippageUsd', label: 'Extra stop slippage ($)', type: 'number', step: 0.05, min: 0 },
       { path: 'execution.tpFillModel', label: 'Simulated take-profit fill', type: 'select', options: [['through', 'Only after price trades through'], ['touch', 'On touch (optimistic)']] },
@@ -185,41 +229,12 @@ export default function SettingsPanel({ state, actions }: { state: BotState; act
   }
 
   const readOnly = !actions.isAdmin;
-  const econ = state.economics;
 
   return (
     <div>
       <div className="grid g-2">
         <ExchangeConnection state={state} actions={actions} />
-        <Card title="Fee reality check" hint={econ ? `At ETH $${num(econ.referencePrice)} · ${econ.contracts} contracts · stop ≈ $${num(econ.stopUsd)} — recomputed live` : 'Waiting for a price'}>
-          {econ ? (
-            <>
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr><th>Target move</th><th className="num">Gross</th><th className="num">Fees (maker TP)</th><th className="num">Net</th><th className="num">Win rate needed</th></tr>
-                  </thead>
-                  <tbody>
-                    {econ.makerTarget.map((r) => (
-                      <tr key={r.moveUsd}>
-                        <td>${num(r.moveUsd, 1)}</td><td className="num">{usd(r.grossReward)}</td><td className="num">{usd(r.fees, 3)}</td>
-                        <td className="num"><b className={r.netReward > 0 ? 'good' : 'bad'}>{r.netReward > 0 ? '+' : ''}{usd(r.netReward)}</b></td>
-                        <td className="num">{pct(r.requiredWinRate, 0)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <p className="sec" style={{ fontSize: 12, marginBottom: 0 }}>
-                Taker {pct(econ.rates.taker, 3)} / maker {pct(econ.rates.maker, 3)} + GST {pct(econ.rates.gst, 0)}. Price must move <b>${num(econ.breakevenMoveMakerExitUsd)}</b> just to cover fees with a maker take-profit
-                (<b>${num(econ.breakevenMoveTakerExitUsd)}</b> if the exit is a taker order). “Win rate needed” is the break-even rate for the target above vs a ${num(econ.stopUsd)} stop; the bot also blocks trades below your minimum net reward:risk.
-                {!econ.verifiedSpec && ' Fee rates shown are documented fallbacks, not read from the exchange.'}
-              </p>
-            </>
-          ) : (
-            <div className="empty">No price yet.</div>
-          )}
-        </Card>
+        <FeeRealityCard state={state} />
       </div>
 
       <div className="grid">
@@ -286,6 +301,7 @@ export default function SettingsPanel({ state, actions }: { state: BotState; act
                   );
                 })}
               </div>
+              {g.readout?.(draft)}
             </fieldset>
           ))}
         </Card>

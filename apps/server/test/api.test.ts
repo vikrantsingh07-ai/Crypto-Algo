@@ -87,6 +87,7 @@ describe('authentication & roles', () => {
       ['POST', '/api/bot/stop'],
       ['PUT', '/api/settings', { position: { leverage: 20 } }],
       ['POST', '/api/live/preflight'],
+      ['POST', '/api/live/waiver/reset'],
       ['POST', '/api/live/activate', { token: 'x'.repeat(20), phrase: PHRASE, acknowledged: true, password: VPW }],
       ['PUT', '/api/credentials', { apiKey: 'abcdefgh', apiSecret: 'abcdefgh', password: VPW }],
       ['POST', '/api/demo/reset', {}],
@@ -167,9 +168,50 @@ describe('live activation workflow', () => {
     expect(p.token).toBeTruthy();
     expect(p.requiredPhrase).toBe(PHRASE);
     expect(p.summary).toMatchObject({ contracts: 20, quantityEth: 0.2, leverage: 50, symbol: 'ETHUSD', realMoney: false });
-    expect(p.summary.breakevenMoveUsd).toBeGreaterThan(2);
-    expect(p.checks.map((c: any) => c.id)).toEqual(expect.arrayContaining(['credentials', 'exchange_reachable', 'contract_status', 'quantity', 'leverage', 'auth', 'trading_permission', 'balance', 'exchange_state', 'market_data_fresh', 'clock', 'risk_limits']));
+    // Scalper Offer assumed (default): only the taker ENTRY fee has to be earned back (~$0.354 / 0.2 ETH = ~$1.77), not entry + exit (~$2.48)
+    expect(p.summary.breakevenMoveUsd).toBeGreaterThan(1.6);
+    expect(p.summary.breakevenMoveUsd).toBeLessThan(2);
+    expect(p.summary.scalperOffer).toEqual({ assumed: true, windowMinutes: 30, safetyMarginSeconds: 90, effectiveMaxHoldMinutes: 28.5 });
+    expect(p.checks.map((c: any) => c.id)).toEqual(expect.arrayContaining(['credentials', 'exchange_reachable', 'contract_status', 'quantity', 'leverage', 'auth', 'trading_permission', 'balance', 'exchange_state', 'market_data_fresh', 'clock', 'risk_limits', 'scalper_offer']));
     await expectStillDemo(); // preflight alone changes nothing
+  });
+
+  it('with the Scalper Offer waiver switched off the economics include the closing fee again (break-even > $2)', async () => {
+    const r = await call('PUT', '/api/settings', admin, { execution: { exitFeeWaiver: { enabled: false } } });
+    expect(r.statusCode, r.body).toBe(200);
+    const p = await preflight();
+    expect(p.ok).toBe(true);
+    expect(p.summary.breakevenMoveUsd).toBeGreaterThan(2); // entry taker + exit maker, ~$2.48
+    expect(p.summary.scalperOffer).toEqual({ assumed: false, windowMinutes: 30, safetyMarginSeconds: 90, effectiveMaxHoldMinutes: 30 });
+    const chk = p.checks.find((c: any) => c.id === 'scalper_offer');
+    expect(chk).toMatchObject({ ok: true, blocker: false });
+    expect(chk.detail).toMatch(/switched off/);
+  });
+
+  it('the scalper_offer check is informational (never blocks) and explains what cannot be verified', async () => {
+    const p = await preflight();
+    const chk = p.checks.find((c: any) => c.id === 'scalper_offer');
+    expect(chk).toMatchObject({ blocker: false, ok: true });
+    expect(chk.detail).toMatch(/must be joined in your Delta account/);
+    expect(chk.detail).toMatch(/cannot be verified through the API/);
+    expect(chk.detail).toMatch(/verified on the first eligible live close/);
+    expect(chk.detail).toMatch(/Diwali.*BTCUSD only.*not modelled/);
+    // even a pessimistic status does not block activation
+    h.rt.live.waiver = { status: 'not_applied', confirmedCount: 0, lastCheck: null, since: h.clock.t };
+    const p2 = await preflight();
+    expect(p2.checks.find((c: any) => c.id === 'scalper_offer')).toMatchObject({ ok: false, blocker: false });
+    expect(p2.ok).toBe(true);
+    expect(p2.token).toBeTruthy();
+    // live then gates on the full closing fee: the break-even is back above $2
+    expect(p2.summary.breakevenMoveUsd).toBeGreaterThan(2);
+    expect(p2.summary.scalperOffer).toMatchObject({ assumed: true, effectiveMaxHoldMinutes: 30 });
+  });
+
+  it('the Scalper Offer acknowledgement is required reading: it is the last of five and states the dependency', async () => {
+    const p = await preflight();
+    expect(p.acknowledgements).toHaveLength(5);
+    expect(p.acknowledgements[4]).toBe('I understand the zero closing fee depends on my Delta account having joined the Scalper Offer; if it has not, closing fees apply and results will be lower than shown.');
+    expect(p.acknowledgements.slice(0, 4).join(' ')).toMatch(/REAL orders.*50x leverage.*Demo mode.*Kill Switch/);
   });
 
   it('the trading-permission probe re-sends the CURRENT leverage and places no order', async () => {
@@ -214,6 +256,27 @@ describe('live activation workflow', () => {
     const r = await activate({ token: p.token, phrase: PHRASE, acknowledged: true, password: PW });
     expect(r.statusCode).toBe(400);
     expect((r.json() as any).message).toMatch(/changed since review/);
+    await expectStillDemo();
+  });
+
+  it('changing any Scalper Offer waiver setting after review invalidates the review token', async () => {
+    // a 20 minute hold is below every clamp, so the visible summary does not change when only the waiver fields do
+    await call('PUT', '/api/settings', admin, { exits: { maxHoldMinutes: 20 } });
+    const p = await preflight();
+    expect(p.summary.scalperOffer.effectiveMaxHoldMinutes).toBe(20);
+    const put = await call('PUT', '/api/settings', admin, { execution: { exitFeeWaiver: { clampTimeExit: false } } });
+    expect(put.statusCode, put.body).toBe(200);
+    const r = await activate({ token: p.token, phrase: PHRASE, acknowledged: true, password: PW });
+    expect(r.statusCode).toBe(400);
+    expect((r.json() as any).message).toMatch(/changed since review/);
+    await expectStillDemo();
+
+    // enabling/disabling the assumption obviously changes it too
+    const p2 = await preflight();
+    await call('PUT', '/api/settings', admin, { execution: { exitFeeWaiver: { enabled: false } } });
+    const r2 = await activate({ token: p2.token, phrase: PHRASE, acknowledged: true, password: PW });
+    expect(r2.statusCode).toBe(400);
+    expect((r2.json() as any).message).toMatch(/changed since review/);
     await expectStillDemo();
   });
 
@@ -302,6 +365,57 @@ describe('live activation workflow', () => {
     h.clock.t += 120_000;
     const p = await preflight();
     expect(p.checks.find((c: any) => c.id === 'market_data_fresh').ok).toBe(false);
+  });
+});
+
+describe('Scalper Offer status reset endpoint', () => {
+  beforeEach(() => boot());
+
+  const notApplied = async () => {
+    h.rt.live.waiver = { status: 'not_applied', confirmedCount: 2, lastCheck: { tradeId: 'L-x', at: h.clock.t, holdMs: 120_000, expectedWaived: true, exitFeeUsd: 0.35 }, since: h.clock.t };
+    await (h.rt.live as any).persistWaiver();
+  };
+
+  it('(h) a viewer cannot reset it (403, audited as forbidden); an administrator can (audited, persisted)', async () => {
+    await notApplied();
+    const v = await call('POST', '/api/live/waiver/reset', viewer);
+    expect(v.statusCode).toBe(403);
+    expect(h.rt.live.waiver.status).toBe('not_applied'); // untouched
+    expect((await h.rt.repos.listAudit(10, 'forbidden')).some((e) => e.actor === 'viewer')).toBe(true);
+    expect((await call('POST', '/api/live/waiver/reset')).statusCode).toBe(401); // no session
+
+    const a = await call('POST', '/api/live/waiver/reset', admin);
+    expect(a.statusCode, a.body).toBe(200);
+    expect((a.json() as any).scalper).toMatchObject({ status: 'unverified', confirmedCount: 0, lastCheck: null, assumed: true, effective: true, effectiveMaxHoldMinutes: 28.5 });
+    expect(h.rt.live.waiver.status).toBe('unverified');
+    expect(await h.rt.repos.getDoc('live_waiver')).toMatchObject({ status: 'unverified', confirmedCount: 0, lastCheck: null });
+    const audit = await h.rt.repos.listAudit(10, 'scalper_offer_status_reset');
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actor: 'admin', role: 'admin', success: true });
+    expect(audit[0].details).toMatchObject({ reason: 'operator', previous: { status: 'not_applied', confirmedCount: 2 } });
+    // the state endpoint reflects it
+    expect(((await call('GET', '/api/state', viewer)).json() as any).live.scalper.status).toBe('unverified');
+  });
+
+  it('works with an empty JSON body and the proxy shared secret like the other action endpoints', async () => {
+    await app.close();
+    await h.stop();
+    await boot({ PROXY_SHARED_SECRET: 'proxy-secret-proxy-secret' });
+    await notApplied();
+    const noSecret = await app.inject({ method: 'POST', url: '/api/live/waiver/reset', headers: { authorization: `Bearer ${admin}`, 'content-type': 'application/json' }, remoteAddress: nextIp() });
+    expect(noSecret.statusCode).toBe(403);
+    expect(h.rt.live.waiver.status).toBe('not_applied');
+    const ok = await app.inject({ method: 'POST', url: '/api/live/waiver/reset', headers: { authorization: `Bearer ${admin}`, 'content-type': 'application/json', 'x-proxy-secret': 'proxy-secret-proxy-secret' }, remoteAddress: nextIp() });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(h.rt.live.waiver.status).toBe('unverified');
+  });
+
+  it('is refused while this instance is not the active worker (it could not apply the reset where it matters)', async () => {
+    await notApplied();
+    h.rt.bot.workerActive = false;
+    const r = await call('POST', '/api/live/waiver/reset', admin);
+    expect(r.statusCode).toBe(409);
+    expect(h.rt.live.waiver.status).toBe('not_applied');
   });
 });
 

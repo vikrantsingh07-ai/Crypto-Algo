@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { num, pct, usd } from '@/lib/format';
+import { DIWALI_NOTE, minutes } from '@/lib/scalper';
 import type { BotState } from '@/lib/types';
 import { Modal, Tag } from './ui';
 
@@ -13,10 +14,14 @@ interface Check {
   blocker: boolean;
   detail: string;
 }
+/** Only the fields the Scalper Offer row needs are typed; the rest of the summary is read loosely. */
+type PreflightSummary = Record<string, any> & {
+  scalperOffer?: { assumed: boolean; windowMinutes: number; safetyMarginSeconds: number; effectiveMaxHoldMinutes: number };
+};
 interface Preflight {
   ok: boolean;
   checks: Check[];
-  summary: any;
+  summary: PreflightSummary;
   token: string | null;
   expiresAt: number;
   requiredPhrase: string;
@@ -114,7 +119,8 @@ export default function ActivationWizard({ state, onClose, onDone }: { state: Bo
             <ul className="checks" style={{ marginTop: 8 }}>
               {pre.checks.map((c) => (
                 <li key={c.id}>
-                  <span className={`mark ${c.ok ? 'ok' : c.blocker ? 'no' : ''}`}>{c.ok ? '✓' : c.blocker ? '✕' : 'i'}</span>
+                  {/* the Scalper Offer cannot be verified through the API, so it is always shown as information, never a green tick */}
+                  <span className={`mark ${c.id === 'scalper_offer' ? (c.ok ? 'info' : 'no') : c.ok ? 'ok' : c.blocker ? 'no' : ''}`}>{c.id === 'scalper_offer' ? (c.ok ? 'i' : '!') : c.ok ? '✓' : c.blocker ? '✕' : 'i'}</span>
                   <span><b>{c.title}</b> <span className="sec">— {c.detail}</span></span>
                 </li>
               ))}
@@ -140,9 +146,27 @@ export default function ActivationWizard({ state, onClose, onDone }: { state: Bo
               <tr><td className="sec">Position</td><td className="num">{s.quantityEth} ETH = {s.contracts} contracts · {s.leverage}x (max {s.maxLeverage}x)</td></tr>
               <tr><td className="sec">Est. margin per trade</td><td className="num">{usd(s.estimatedMarginUsd)} of {usd(s.availableBalanceUsd)} available</td></tr>
               <tr><td className="sec">Target · stop (ETH price move)</td><td className="num">${s.targetRangeUsd[0]}–${s.targetRangeUsd[1]} · up to ${s.stopLossMaxUsd}</td></tr>
-              <tr><td className="sec">Max hold · trades/24h</td><td className="num">{s.maxHoldMinutes} min · {s.maxTradesPer24h}</td></tr>
+              <tr><td className="sec">Max hold · trades/24h</td><td className="num">{s.scalperOffer?.assumed && s.scalperOffer.effectiveMaxHoldMinutes < s.maxHoldMinutes ? <>{minutes(s.scalperOffer.effectiveMaxHoldMinutes)} <span className="muted">(configured {s.maxHoldMinutes})</span></> : <>{s.maxHoldMinutes} min</>} · {s.maxTradesPer24h}</td></tr>
               <tr><td className="sec">Per-trade risk · daily loss · max drawdown</td><td className="num">{usd(s.perTradeRiskUsd)} · {usd(s.dailyLossLimitUsd)} · {s.maxDrawdownPct}%</td></tr>
               <tr><td className="sec">Fee break-even move</td><td className="num">${num(s.breakevenMoveUsd)} per ETH — fees take ≈ {pct(s.feeFractionOfTarget, 0)} of a mid-size target</td></tr>
+              <tr>
+                <td className="sec">Closing-fee waiver (Scalper Offer)</td>
+                <td className="num">
+                  {s.scalperOffer ? (
+                    s.scalperOffer.assumed ? (
+                      <>
+                        <b>ASSUMED</b> — a close within {s.scalperOffer.windowMinutes} min pays no closing fee, only the entry fee; time exit at {minutes(s.scalperOffer.effectiveMaxHoldMinutes)} ({s.scalperOffer.safetyMarginSeconds} s margin).
+                        <div className="muted" style={{ fontSize: 12 }}>Not verifiable through the Delta API: your account must have joined the offer. Live P&amp;L uses the fees Delta actually charges, and the first eligible closes are checked.</div>
+                      </>
+                    ) : (
+                      <><b>OFF</b> — the full closing fee is counted in every estimate.</>
+                    )
+                  ) : (
+                    <span className="muted">not reported by this server version</span>
+                  )}
+                  <div className="muted" style={{ fontSize: 12 }}>{DIWALI_NOTE}</div>
+                </td>
+              </tr>
               <tr><td className="sec">API key</td><td className="num">{s.credentialFingerprint}</td></tr>
               <tr><td className="sec">If you switch back to Demo with a position open</td><td className="num">{String(s.positionPolicyOnSwitchToDemo).replace(/_/g, ' ')}</td></tr>
               <tr><td className="sec">Kill switch with a position open</td><td className="num">{String(s.killSwitchAction).replace(/_/g, ' ')}</td></tr>

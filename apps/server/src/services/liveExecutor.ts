@@ -1,6 +1,7 @@
 import {
   breakevenStopPrice,
   calcFee,
+  effectiveMaxHoldMs,
   estimateLiquidationPrice,
   evaluateEntryRisk,
   effectiveConsecutiveLosses,
@@ -12,6 +13,8 @@ import {
   type ClosedTrade,
   type ContractSpec,
   type ExitReason,
+  type FeeConfig,
+  type FeeConfigOptions,
   type OpenPosition,
   type Quote,
   type RiskDecision,
@@ -55,6 +58,13 @@ import type { BotState, Repos, TradeRow } from '../repos';
  *  - Exchange-side protective stop is placed immediately after the entry fill; if that fails the
  *    position is flattened at once.
  *  - After any restart, `reconcile()` compares the database with the exchange before entries resume.
+ *
+ * Delta "Scalper Offer" (no closing fee when a position is closed within the window)
+ *  - The offer can not be read through the API, so the waiver is ASSUMED for estimates while
+ *    `settings.execution.exitFeeWaiver.enabled`. Reported P&L always uses the commission the exchange charged.
+ *  - Every eligible close is checked against the assumption (see `verifyWaiver`). A charged closing fee on an
+ *    eligible trade flips the persisted status to `not_applied`: from then on entries are gated on full-fee
+ *    economics and the time exit is no longer clamped. That can only make the bot trade LESS, never more.
  */
 
 export interface LiveDeps {
@@ -71,7 +81,7 @@ export interface LiveDeps {
   now: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger: Logger;
-  onAttention?: (message: string) => void;
+  onAttention?: (message: string) => void | Promise<void>;
 }
 
 export interface LiveAccountView {
@@ -96,6 +106,37 @@ export interface LivePosition extends OpenPosition {
   lastRealizedFunding: number;
 }
 
+/** Result of checking the Scalper Offer assumption against what the exchange actually charged. */
+export type ScalperStatus = 'unverified' | 'confirmed' | 'not_applied';
+
+export interface ScalperCheck {
+  tradeId: string;
+  at: number;
+  /** Opening fill -> closing fill, ms (exchange timestamps when available). */
+  holdMs: number;
+  /** True when the close was eligible: waiver enabled, inside the window (minus a small tolerance), not a liquidation. */
+  expectedWaived: boolean;
+  /** Commission the exchange actually charged on the closing fills, USD. */
+  exitFeeUsd: number;
+}
+
+export interface WaiverState {
+  status: ScalperStatus;
+  confirmedCount: number;
+  lastCheck: ScalperCheck | null;
+  /** When the current state began (first load, last status change or last reset). */
+  since: number;
+}
+
+const WAIVER_DOC = 'live_waiver';
+/** A closing commission at or below this counts as "waived" (rounding noise only). */
+const WAIVER_FEE_TOLERANCE_USD = 0.001;
+/**
+ * A close this close to the end of the window is ambiguous (exchange vs server clock, order latency, how Delta
+ * measures the cut-off), so it is neither counted as confirming nor as refuting the offer.
+ */
+const WAIVER_BOUNDARY_TOLERANCE_MS = 5_000;
+
 export class EntryRefusedError extends Error {}
 class AmbiguousOrderError extends Error {}
 
@@ -112,6 +153,8 @@ export class LiveExecutor {
   lastMonitorAt = 0;
   peakEquityUsd: number | null = null;
   baselineEquityUsd: number | null = null;
+  /** Persisted Scalper Offer verification state (doc `live_waiver`). */
+  waiver: WaiverState = { status: 'unverified', confirmedCount: 0, lastCheck: null, since: 0 };
 
   private pending = false;
   private chain: Promise<unknown> = Promise.resolve();
@@ -123,6 +166,7 @@ export class LiveExecutor {
 
   constructor(private readonly d: LiveDeps) {
     this.sleep = d.sleep ?? defaultSleep;
+    this.waiver.since = d.now();
   }
 
   private run<T>(fn: () => Promise<T>): Promise<T> {
@@ -135,6 +179,137 @@ export class LiveExecutor {
     const id = this.d.getSpec().productId;
     if (!id) throw new Error('Exchange product id unknown (contract spec not fetched from the exchange)');
     return id;
+  }
+
+  // ======================================================================================
+  // Scalper Offer (closing-fee waiver): live state, fee configuration, verification
+  // ======================================================================================
+
+  /** Whether LIVE economics may assume a free closing leg: enabled in settings AND not contradicted by the exchange. */
+  waiverEffective(): boolean {
+    return this.d.getSettings().execution.exitFeeWaiver.enabled && this.waiver.status !== 'not_applied';
+  }
+
+  private feeOpts(): FeeConfigOptions {
+    return { waiverOverride: this.waiverEffective() };
+  }
+
+  private feeConfig(): FeeConfig {
+    return feeConfigFrom(this.d.getSettings(), this.d.getSpec(), this.feeOpts());
+  }
+
+  async loadWaiver(): Promise<void> {
+    const saved = await this.d.repos.getDoc<Partial<WaiverState>>(WAIVER_DOC);
+    if (!saved) return;
+    const status: ScalperStatus = saved.status === 'confirmed' || saved.status === 'not_applied' ? saved.status : 'unverified';
+    this.waiver = {
+      status,
+      confirmedCount: Number.isFinite(saved.confirmedCount) ? Number(saved.confirmedCount) : 0,
+      lastCheck: saved.lastCheck && typeof saved.lastCheck === 'object' ? (saved.lastCheck as ScalperCheck) : null,
+      since: Number.isFinite(saved.since) ? Number(saved.since) : this.d.now(),
+    };
+  }
+
+  private async persistWaiver(): Promise<void> {
+    await this.d.repos.setDoc(WAIVER_DOC, this.waiver);
+  }
+
+  /** Back to "unverified" (operator action or a change of the waiver settings). Returns the previous state. */
+  resetWaiver(): Promise<{ previous: WaiverState; changed: boolean }> {
+    return this.run(async () => {
+      const previous = this.waiver;
+      const changed = previous.status !== 'unverified' || previous.confirmedCount > 0 || previous.lastCheck !== null;
+      this.waiver = { status: 'unverified', confirmedCount: 0, lastCheck: null, since: this.d.now() };
+      await this.persistWaiver();
+      return { previous, changed };
+    });
+  }
+
+  /** What the dashboard shows about the offer in the Live panel. */
+  scalperView() {
+    const s = this.d.getSettings();
+    const w = s.execution.exitFeeWaiver;
+    const effective = this.waiverEffective();
+    return {
+      assumed: w.enabled,
+      effective,
+      status: this.waiver.status,
+      confirmedCount: this.waiver.confirmedCount,
+      lastCheck: this.waiver.lastCheck,
+      windowMinutes: w.withinMinutes,
+      safetyMarginSeconds: w.safetyMarginSeconds,
+      effectiveMaxHoldMinutes: effectiveMaxHoldMs(s, effective) / 60_000,
+      note: this.waiverNote(),
+    };
+  }
+
+  private waiverNote(): string {
+    const w = this.d.getSettings().execution.exitFeeWaiver;
+    if (!w.enabled) return `The Scalper Offer waiver is switched off in Settings, so every live estimate includes the closing fee.`;
+    switch (this.waiver.status) {
+      case 'confirmed':
+        return `Verified on ${this.waiver.confirmedCount} live close(s): Delta charged no closing fee on trades closed within ${w.withinMinutes} minutes.`;
+      case 'not_applied':
+        return `Delta charged a closing fee on a trade closed within ${w.withinMinutes} minutes, so the offer does not appear to be active on this account; live entries are gated on full-fee economics until you join the offer and use "Reset & re-check".`;
+      default:
+        return `Assumed but not yet verified: the first live trade closed within ${w.withinMinutes} minutes will show whether Delta waived the closing fee (the offer must be joined in your Delta account and cannot be read through the API); the separate BTCUSD-only Diwali Scalper Offer does not apply to this ETHUSD bot and is not modelled.`;
+    }
+  }
+
+  private async attend(message: string): Promise<void> {
+    try {
+      await this.d.onAttention?.(message);
+    } catch {
+      /* an attention item must never break trade finalisation */
+    }
+  }
+
+  /**
+   * Compare the exchange's closing commission with the Scalper Offer assumption. Called once per finalised trade
+   * when the closing fills are known. A close after the window (or a liquidation) is recorded but never counted.
+   */
+  private async verifyWaiver(trade: ClosedTrade, exitFeeUsd: number, reason: ExitReason): Promise<void> {
+    const w = this.d.getSettings().execution.exitFeeWaiver;
+    if (this.waiver.lastCheck?.tradeId === trade.id) return; // already evaluated (finalisation can be re-entered)
+    const windowMs = w.withinMinutes * 60_000;
+    const expectedWaived = w.enabled && reason !== 'liquidation' && trade.holdMs <= windowMs - WAIVER_BOUNDARY_TOLERANCE_MS;
+    const check: ScalperCheck = { tradeId: trade.id, at: this.d.now(), holdMs: trade.holdMs, expectedWaived, exitFeeUsd };
+    const prev = this.waiver;
+    let next: WaiverState = { ...prev, lastCheck: check };
+    let notify: (() => Promise<void>) | null = null;
+
+    if (expectedWaived) {
+      if (exitFeeUsd <= WAIVER_FEE_TOLERANCE_USD) {
+        // A waived close while "not_applied" is recorded but does not silently re-enable the waiver: only the
+        // operator (reset) or a settings change returns the bot to waiver economics.
+        if (prev.status !== 'not_applied') {
+          next = { ...next, status: 'confirmed', confirmedCount: prev.confirmedCount + 1, since: prev.status === 'confirmed' ? prev.since : this.d.now() };
+          if (prev.status !== 'confirmed') {
+            notify = () => this.d.repos.audit({ actor: 'system', action: 'scalper_offer_confirmed', details: { tradeId: trade.id, holdMs: trade.holdMs, exitFeeUsd, windowMinutes: w.withinMinutes } });
+          }
+        }
+      } else {
+        // later charged closes while already "not_applied" are expected: no second alarm, just the updated lastCheck
+        if (prev.status !== 'not_applied') {
+          next = { ...next, status: 'not_applied', since: this.d.now() };
+          const minutes = (trade.holdMs / 60_000).toFixed(1);
+          notify = async () => {
+            await this.d.repos.audit({
+              actor: 'system',
+              action: 'scalper_offer_not_applied',
+              details: { tradeId: trade.id, holdMs: trade.holdMs, exitFeeUsd, windowMinutes: w.withinMinutes, previousStatus: prev.status, confirmedCount: prev.confirmedCount },
+            });
+            await this.attend(
+              `Delta charged a closing fee ($${exitFeeUsd.toFixed(4)}) on live trade ${trade.id}, closed after ${minutes} min inside the ${w.withinMinutes}-minute Scalper window. The Scalper Offer does not appear to be active on this account, so the bot switched to full-fee economics (closing fees are charged). Join the offer in your Delta account, then use "Reset & re-check" on the Live panel.`,
+            );
+          };
+        }
+      }
+    }
+    this.waiver = next;
+    await this.persistWaiver();
+    if (notify) await notify();
+    if (next.status !== prev.status) this.d.logger.warn('scalper offer status changed', { from: prev.status, to: next.status, tradeId: trade.id, holdMs: trade.holdMs, exitFeeUsd });
   }
 
   private toUsd(amount: number, asset: string): number {
@@ -247,6 +422,7 @@ export class LiveExecutor {
   }
 
   async loadHistory(): Promise<void> {
+    await this.loadWaiver();
     const saved = await this.d.repos.getDoc<{ baseline: number | null; peak: number | null }>('live_baseline');
     if (saved) {
       this.baselineEquityUsd = saved.baseline;
@@ -345,8 +521,7 @@ export class LiveExecutor {
     const targetOrder = orders.find((o) => o.reduceOnly && !o.stopOrderType && o.orderType === 'limit_order');
     const meta = t.meta ?? {};
     const entryPrice = pos.entryPrice ?? t.entryPrice ?? 0;
-    const fees = feeConfigFrom(this.d.getSettings(), spec);
-    const entryFee = calcFee({ price: entryPrice, contracts: Math.abs(pos.size), contractValue: spec.contractValue, role: 'taker' }, fees);
+    const entryFee = calcFee({ price: entryPrice, contracts: Math.abs(pos.size), contractValue: spec.contractValue, role: 'taker' }, this.feeConfig());
     const existing = this.position?.id === t.id ? this.position : null;
     return {
       id: t.id,
@@ -482,7 +657,14 @@ export class LiveExecutor {
     const contracts = t.contracts;
     const usd = (v: number) => v; // settling asset assumed USD-valued; INR handled in toUsd for balances
     const entryFee = entryFills.length ? usd(entryFills.reduce((s, f) => s + f.commission, 0)) : t.entryFee ?? 0;
-    const exitFee = exitFills.length ? usd(exitFills.reduce((s, f) => s + f.commission, 0)) : calcFee({ price: exitPrice, contracts, contractValue: spec.contractValue, role: 'taker', isExit: true }, feeConfigFrom(settings, spec)).total;
+    const exitTs = exitFills.length ? Math.max(...exitFills.map((f) => f.createdAt ?? this.d.now())) : this.d.now();
+    // Hold time as the exchange sees it: opening fill -> closing fill (both exchange timestamps when known).
+    const entryFillTimes = entryFills.map((f) => f.createdAt).filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
+    const holdMs = Math.max(0, exitTs - (entryFillTimes.length ? Math.min(...entryFillTimes) : t.entryTs));
+    // With real exit fills the commission is whatever the exchange charged (authoritative, may be 0 under the
+    // Scalper Offer). Without them the estimate uses the live fee configuration at the observed hold time.
+    const exitEstimate = calcFee({ price: exitPrice, contracts, contractValue: spec.contractValue, role: 'taker', isExit: true, holdMs }, this.feeConfig());
+    const exitFee = exitFills.length ? usd(exitFills.reduce((s, f) => s + f.commission, 0)) : exitEstimate.total;
     const gross = grossPnl(t.side, entryPrice, exitPrice, contracts, spec.contractValue);
     const meta = t.meta ?? {};
     const funding = Number(meta.fundingEstimate ?? 0);
@@ -497,20 +679,37 @@ export class LiveExecutor {
     else if (exitOrders.some((o) => o.purpose === 'exit')) reason = (meta.closeReason as ExitReason) ?? 'manual';
     else if (exitFills.length === 0) reason = 'reconcile';
 
-    const exitTs = exitFills.length ? Math.max(...exitFills.map((f) => f.createdAt ?? this.d.now())) : this.d.now();
+    // Closing fee the Scalper Offer saved: only claimed when the exchange really charged nothing on an eligible close.
+    const windowMs = settings.execution.exitFeeWaiver.withinMinutes * 60_000;
+    let exitFeeSaved = 0;
+    if (exitFills.length === 0) exitFeeSaved = exitEstimate.saved ?? 0;
+    else if (exitFee <= WAIVER_FEE_TOLERANCE_USD && settings.execution.exitFeeWaiver.enabled && reason !== 'liquidation' && holdMs <= windowMs) {
+      const full = feeConfigFrom(settings, spec, { waiverOverride: false });
+      exitFeeSaved = exitFills.reduce((sum, f) => sum + calcFee({ price: f.price, contracts: f.size, contractValue: spec.contractValue, role: f.role === 'maker' ? 'maker' : 'taker' }, full).total, 0);
+    }
     const trade: ClosedTrade = {
       id: t.id, mode: 'live', side: t.side, contracts, qtyEth: contracts * spec.contractValue, leverage: t.leverage, entryTs: t.entryTs, exitTs,
-      entryPrice, exitPrice, exitReason: reason, stopPrice: t.stopPrice ?? 0, targetPrice: t.targetPrice ?? 0, grossPnl: gross, entryFee, exitFee,
+      entryPrice, exitPrice, exitReason: reason, stopPrice: t.stopPrice ?? 0, targetPrice: t.targetPrice ?? 0, grossPnl: gross, entryFee, exitFee, exitFeeSaved,
       fees: entryFee + exitFee, slippageCost: Number(meta.entrySlippageCost ?? 0), funding, netPnl: net, netPnlInr: net * settings.execution.usdInrRate,
-      holdMs: Math.max(0, exitTs - t.entryTs), mfe: Number(meta.mfe ?? 0), mae: Number(meta.mae ?? 0), reachedTarget: Boolean(meta.reachedTargetAtMs) || (dir === 1 ? exitPrice >= (t.targetPrice ?? Infinity) : exitPrice <= (t.targetPrice ?? -Infinity)),
+      holdMs, mfe: Number(meta.mfe ?? 0), mae: Number(meta.mae ?? 0), reachedTarget: Boolean(meta.reachedTargetAtMs) || (dir === 1 ? exitPrice >= (t.targetPrice ?? Infinity) : exitPrice <= (t.targetPrice ?? -Infinity)),
       regime: (t.regime ?? 'range') as ClosedTrade['regime'], reasons: t.reasons ?? [],
     };
     for (const f of fills) {
       if (entryFills.includes(f) || exitFills.includes(f)) await this.d.repos.saveFill({ fillId: f.id, orderId: f.orderId, tradeId: t.id, side: f.side, size: f.size, price: f.price, role: f.role, commission: f.commission, ts: f.createdAt });
     }
-    await this.d.repos.saveClosedTrade(trade, { ...meta, finalizedBy: 'exchange_sync', commissionSource: fills.length ? 'exchange_fills' : 'estimate' });
+    await this.d.repos.saveClosedTrade(trade, { ...meta, finalizedBy: 'exchange_sync', commissionSource: exitFills.length ? 'exchange_fills' : 'estimate' });
     this.noteClosed(trade);
     this.d.logger.info('live trade finalised from exchange state', { id: t.id, reason, net });
+    // Scalper Offer: check the assumption against the real closing commission, and flag a late (fee-paying) close.
+    // Bookkeeping only: a failure here must never leave the executor believing a closed position is still open.
+    try {
+      if (exitFills.length > 0) await this.verifyWaiver(trade, exitFee, reason);
+      if (this.waiverEffective() && reason !== 'liquidation' && holdMs > windowMs) {
+        await this.attend(`Live trade ${t.id} was held ${(holdMs / 60_000).toFixed(1)} min: closed after the Scalper window - closing fee will apply. Check why the exit was delayed.`);
+      }
+    } catch (e) {
+      this.d.logger.error('scalper offer verification failed', { id: t.id, error: (e as Error).message });
+    }
     if (this.position?.id === t.id) this.position = null;
     return trade;
   }
@@ -583,7 +782,8 @@ export class LiveExecutor {
       const entryCid = this.cid(id, 'e');
       rs.lastEntrySignalCandle = (await this.d.repos.getTrade(id)) || (await this.d.repos.liveOrderExists(entryCid)) ? signal.candleTime : null;
 
-      const decision = evaluateEntryRisk({ settings, spec, state: rs, signal, quote });
+      // Economics gate on what live can really expect: the waiver only counts while the exchange has not contradicted it.
+      const decision = evaluateEntryRisk({ settings, spec, state: rs, signal, quote, feeOptions: this.feeOpts() });
       record(decision.allowed, decision.reasons, decision.checks);
       if (!decision.allowed || !decision.plan) return { allowed: false, reasons: decision.reasons };
 
@@ -641,7 +841,7 @@ export class LiveExecutor {
         const live: LivePosition = {
           id, mode: 'live', side: signal.side, contracts: held, contractValue: spec.contractValue, qtyEth: held * spec.contractValue, leverage: settings.position.leverage,
           entryTs: now, entryPrice, entryRefPrice: plan.entryPrice, stopPrice, initialStopPrice: stopPrice, targetPrice, targetMoveUsd: signal.targetMoveUsd, stopMoveUsd: signal.stopMoveUsd,
-          entryFee: { ...calcFee({ price: entryPrice, contracts: held, contractValue: spec.contractValue, role: 'taker' }, feeConfigFrom(settings, spec)), total: fillFee },
+          entryFee: { ...calcFee({ price: entryPrice, contracts: held, contractValue: spec.contractValue, role: 'taker' }, this.feeConfig()), total: fillFee },
           entrySlippageCost: Math.abs(entryPrice - plan.entryPrice) * held * spec.contractValue, marginUsed: pos.margin,
           liquidationPrice: pos.liquidationPrice ?? plan.liquidationPrice, fundingAccrued: 0, mfe: 0, mae: 0, reachedTargetAtMs: null, breakevenArmed: false, nextFundingTs: null,
           regime: signal.regime, reasons: signal.reasons, signalCandleTime: signal.candleTime, productId: this.productId(), stopClientId: this.cid(id, 's', 1), targetClientId: null,
@@ -700,7 +900,7 @@ export class LiveExecutor {
       await this.sleep(250);
     }
     if (order.paidCommission > 0) return order.paidCommission;
-    return calcFee({ price: entryPrice, contracts, contractValue: spec.contractValue, role: 'taker' }, feeConfigFrom(this.d.getSettings(), spec)).total;
+    return calcFee({ price: entryPrice, contracts, contractValue: spec.contractValue, role: 'taker' }, this.feeConfig()).total;
   }
 
   private async ensureLeverage(target: number) {
@@ -750,14 +950,16 @@ export class LiveExecutor {
         return;
       }
       const heldMs = now - p.entryTs;
-      if (heldMs >= s.exits.maxHoldMinutes * 60_000) {
+      // While the Scalper Offer waiver is effective the time exit fires `safetyMarginSeconds` before the window closes,
+      // so even the backstop exit is a free one. A failed close keeps being retried on every monitor tick.
+      if (heldMs >= effectiveMaxHoldMs(s, this.waiverEffective())) {
         await this.closeInner(p, 'time_exit');
         return;
       }
       if (s.exits.timeExitPolicy === 'breakeven_then_close' && !p.breakevenArmed && heldMs >= s.exits.breakevenAfterMinutes * 60_000) {
         const spec = this.d.getSpec();
-        const ctx = paperContext(s, spec, 0);
-        const be = breakevenStopPrice(p, ctx);
+        const ctx = paperContext(s, spec, 0, this.feeOpts());
+        const be = breakevenStopPrice(p, ctx, heldMs);
         const inProfit = dir === 1 ? quote.bid > be : quote.ask < be;
         const tighter = dir === 1 ? be > p.stopPrice : be < p.stopPrice;
         if (inProfit && tighter) await this.replaceStop(p, be);
@@ -879,6 +1081,7 @@ export class LiveExecutor {
       account: this.account,
       position: p,
       lastDecision: this.lastDecision,
+      scalper: this.scalperView(),
       peakEquityUsd: this.peakEquityUsd,
       baselineEquityUsd: this.baselineEquityUsd,
       consecutiveLosses: this.consecutiveLosses,

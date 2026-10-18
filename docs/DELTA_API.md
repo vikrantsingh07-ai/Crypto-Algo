@@ -54,14 +54,24 @@ Linear `vanilla` perpetual: P&L = (exit − entry) × `contract_value` × contra
 
 ## Fees
 
-Product fields `maker_commission_rate` / `taker_commission_rate` (docs sample: 0.02 % / 0.05 %). Commission = rate × notional; GST (18 %) is added in estimates. In Live the **fill's reported commission** is authoritative. No exit-fee waiver is documented anywhere in the API docs; it is not assumed (setting `execution.exitFeeWaiver`, default off).
+Product fields `maker_commission_rate` / `taker_commission_rate` (docs sample: 0.02 % / 0.05 %). Commission = rate × notional; GST (18 %) is added in estimates. In Live the **fill's reported commission is authoritative**: the adapter reads `meta_data.total_commission_in_settling_asset` when a fill has it, otherwise `commission` (`mapFill` in `packages/delta/src/mappers.ts`). Only `commission`, `role`, `size`, `price` and the timestamp of each fill are stored (`live_fills`); the raw `meta_data` is not.
+
+### Scalper Offer (closing-fee waiver): what the API does and does not tell us
+
+* **Terms are operator-supplied.** Close within 30 minutes (BTCUSD and ETHUSD; 15 for other futures) and the closing fee is waived on eligible trades; the opening fee is still paid; the account must have joined; liquidations are not eligible; Delta may change or end it. Nothing in the API documentation used for this project mentions the offer. A web search (result summaries only; Delta's pages could not be opened from the build sandbox) found no enrolment endpoint or flag either, so **enrolment cannot be read or verified through the API**.
+* **How a waived fee appears in a fill is unknown.** Most plausibly `commission` is `0`, but a charge with an offsetting credit is not excluded. The v2 docs list, on a fill, `commission`, `role` and a `meta_data` object (`commission_deto`, `effective_commission_rate`, `total_commission_in_settling_asset`, `tfc_used_for_commission`, `trading_fee_credits_used`), and on orders `paid_commission`; what these hold for a waived close is not documented. The bot's check treats a closing commission ≤ $0.001 as waived and anything higher as charged (see [`STRATEGY_AND_FEES.md`](STRATEGY_AND_FEES.md#live-verification)). If Delta reports a charge and credits it later, the check will read "charged".
+* **Which orders count is unknown**: whether the clock starts at the first or the latest entry fill, and whether reduce-only stop-market, resting take-profit and API-placed market closes are treated like manual closes. The bot assumes all of them are (and that a maker closing fill is waived like a taker one); the first live closes of each kind (take-profit, stop, time exit) are the test.
+* **Testnet**: no text found says whether the offer exists on the India testnet / demo environment. Do not expect waived closing fees there and do not read a testnet result as evidence about production.
+* The Diwali Scalper Offer (opening fee returned as a Fee Voucher, BTCUSD only) does not apply to this ETHUSD bot and is not modelled.
+* **What the bot does about it**: Demo, backtests and the pre-trade gates assume the waiver while `execution.exitFeeWaiver.enabled`; Live P&L uses the reported commission; the first eligible live closes confirm or refute the assumption (`live.scalper.status`). No request in this project reads the offer.
 
 ## Open items to confirm on testnet before real money
 
 1. `ETHUSD`: actual `contract_value`, tick size, max leverage, fee rates (the dashboard shows what was read; activation blocks until verified).
 2. A **reduce-only stop and a reduce-only limit target at full size can coexist** (the executor handles a rejection by flattening only if the *stop* fails; a rejected target falls back to the software target monitor).
 3. Whether a reduce-only market close is accepted while the stop is resting (the executor cancels the stop and retries once if rejected).
-4. Whether `commission` on fills already includes GST; whether INR is the settling currency and how `GET /wallet/balances` reports it (`settling_asset.symbol` is used; INR balances are converted with `usdInrRate`).
+4. Whether `commission` on fills already includes GST (Live uses the reported amount; estimates add GST, e.g. $0.30 + 18 % = $0.354 for a taker leg on $600 notional; compare with the statement); whether INR is the settling currency and how `GET /wallet/balances` reports it (`settling_asset.symbol` is used; INR balances are converted with `usdInrRate`).
 5. `GET /v2/wallet/balances` and `/positions` with your key's permissions.
 6. Funding-rate unit on the WebSocket (`fr: 0.01` is read as 0.01 %); only Demo's funding simulation uses it.
 7. Behaviour of `stop_trigger_method: mark_price` in fast markets (a software backstop engages if price runs 50¢ beyond the stop with the position still open).
+8. **Scalper Offer** (the bot's assumptions, none verified): that a closing fill inside the window reports a commission of 0 for take-profit (maker), stop and time-exit (taker) closes alike; which fill starts the 30 minutes; whether ETHUSD's window is 30 or 15 minutes today (some Delta-sourced text says 15 for futures other than BTC); and whether the testnet has the offer. On the first eligible close compare the dashboard's *Scalper Offer* card (`lastCheck`) with the fill on Delta's trade history.

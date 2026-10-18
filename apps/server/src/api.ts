@@ -133,7 +133,7 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
       metrics: { ...m, equityCurve: curve },
       drawdown: drawdownSeries(curve, m.startingBalance),
       equitySnapshots: downsample(equity, 400),
-      recent: trades.slice(-200).map((t) => ({ id: t.id, side: t.side, entryTs: t.entryTs, exitTs: t.exitTs, netPnl: t.netPnl, fees: t.fees, holdMs: t.holdMs, exitReason: t.exitReason, regime: t.regime, reachedTarget: t.reachedTarget })),
+      recent: trades.slice(-200).map((t) => ({ id: t.id, side: t.side, entryTs: t.entryTs, exitTs: t.exitTs, netPnl: t.netPnl, fees: t.fees, entryFee: t.entryFee, exitFee: t.exitFee, exitFeeSaved: t.exitFeeSaved ?? 0, holdMs: t.holdMs, exitReason: t.exitReason, regime: t.regime, reachedTarget: t.reachedTarget })),
     };
   });
 
@@ -238,6 +238,18 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
     await rt.live.resetBaseline();
     await rt.repos.audit({ ...w, action: 'live_drawdown_baseline_reset', details: { equity: rt.live.baselineEquityUsd } });
     return { ok: true, baselineEquityUsd: rt.live.baselineEquityUsd };
+  });
+
+  /**
+   * Back to "unverified": the bot forgets what it observed about the Scalper Offer (closing-fee waiver) and
+   * verifies it again on the next eligible live close. Used after joining the offer in the Delta account.
+   */
+  app.post('/api/live/waiver/reset', { ...admin, ...strict(10) }, async (req, reply) => {
+    if (!needWorker(reply)) return;
+    const w = who(req);
+    const { previous } = await rt.live.resetWaiver();
+    await rt.repos.audit({ ...w, action: 'scalper_offer_status_reset', details: { reason: 'operator', previous: { status: previous.status, confirmedCount: previous.confirmedCount, lastCheck: previous.lastCheck } } });
+    return { ok: true, scalper: rt.live.scalperView() };
   });
 
   // ------------------------------------------------------------------ admin: demo

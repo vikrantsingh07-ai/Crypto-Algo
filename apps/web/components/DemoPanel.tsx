@@ -3,9 +3,11 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { duration, inr, num, pctRaw, signedUsd, timeShort, usd } from '@/lib/format';
+import { feeWindow, scalperView } from '@/lib/scalper';
 import type { BotState, TradeRow } from '@/lib/types';
 import type { Actions } from './Dashboard';
 import { LineChart } from './charts';
+import { ExitFeeClock, FeeRealityCard, useServerNow } from './scalper';
 import { Card, Checks, Pnl, Stat, Tag } from './ui';
 import { Meter } from './charts';
 
@@ -55,43 +57,100 @@ export function ConditionList({ state }: { state: BotState }) {
   );
 }
 
-export function TradesTable({ rows, mode }: { rows: TradeRow[] | null; mode: 'demo' | 'live' }) {
+/** Exit-fee cell: FREE when the Scalper Offer waived it, otherwise the charged amount (Live: as reported by the exchange). */
+function ExitFeeCell({ t, windowMin, live }: { t: TradeRow; windowMin: number; live: boolean }) {
+  if (t.exitFee === null || t.exitFee === undefined) return <span className="muted">—</span>;
+  const saved = t.exitFeeSaved ?? t.meta?.exitFeeSaved ?? null;
+  if (t.exitFee === 0) {
+    return <><Tag kind="good">FREE</Tag>{saved ? <div className="sub">saved {usd(saved, 3)}</div> : live ? <div className="sub">exchange: $0.00</div> : null}</>;
+  }
+  // charged although it closed inside the window: surface it (liquidations and ineligible trades legitimately pay)
+  const inside = t.holdMs !== null && t.holdMs <= windowMin * 60_000;
+  return (
+    <span title={inside ? 'Closed inside the offer window but a closing fee was charged (liquidation, not eligible, or the offer is not applied).' : undefined}>
+      {usd(t.exitFee, 3)}
+      {inside && <div className="sub warn-text">charged in window</div>}
+    </span>
+  );
+}
+
+/** Phone layout: one card per trade so the fee outcome (exit FREE / charged) is visible without sideways scrolling. */
+function TradeCards({ rows, live, windowMin }: { rows: TradeRow[]; live: boolean; windowMin: number }) {
+  return (
+    <ul className="trade-cards">
+      {rows.map((t) => (
+        <li key={t.id}>
+          <div className="tc-head">
+            <b>{t.side === 'long' ? '▲ Long' : '▼ Short'}</b> <span className="muted">{num(t.qtyEth, 2)} ETH · {timeShort(t.entryTs)}</span>
+            <span className="tc-net">{t.status === 'closed' ? <Pnl v={t.netPnl} /> : t.status === 'open' ? <Tag>open</Tag> : <Tag kind="warn">{t.status}</Tag>}</span>
+          </div>
+          <div className="sec tc-line">
+            {t.status === 'closed'
+              ? <>{num(t.entryPrice)} → {num(t.exitPrice)} · {t.exitReason?.replace(/_/g, ' ') ?? '—'} · held {duration(t.holdMs)}</>
+              : <>entry {num(t.entryPrice)} · {t.status === 'open' ? 'position still open' : t.status.replace(/_/g, ' ')}</>}
+          </div>
+          {t.status === 'open' && t.entryFee !== null && t.entryFee !== undefined && (
+            <div className="tc-fees"><span>entry fee {usd(t.entryFee, 3)} (paid)</span><span className="muted">exit fee is settled when it closes</span></div>
+          )}
+          {t.status === 'closed' && (
+            <div className="tc-fees">
+              <span>entry fee {t.entryFee === null || t.entryFee === undefined ? '—' : usd(t.entryFee, 3)}</span>
+              <span className="tc-exit">{live ? 'exit fee (exchange)' : 'exit fee'} <ExitFeeCell t={t} windowMin={windowMin} live={live} /></span>
+              <span className="muted">net {t.netPnlInr === null ? '—' : inr(t.netPnlInr)}</span>
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function TradesTable({ rows, mode, windowMin = 30 }: { rows: TradeRow[] | null; mode: 'demo' | 'live'; windowMin?: number }) {
   if (!rows) return <div className="empty">Loading…</div>;
   if (!rows.length) return <div className="empty">{mode === 'demo' ? 'No simulated trades yet.' : 'No live trades recorded by this bot yet.'}</div>;
+  const live = mode === 'live';
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Opened</th><th>Side</th><th className="num">Qty ETH</th><th className="num">Entry</th><th className="num">Exit</th><th>Exit reason</th>
-            <th className="num">Hold</th><th className="num">Gross</th><th className="num">Fees</th><th className="num">Net</th><th className="num">Net ₹</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((t) => (
-            <tr key={t.id}>
-              <td>{timeShort(t.entryTs)}</td>
-              <td>{t.side === 'long' ? '▲ Long' : '▼ Short'}</td>
-              <td className="num">{num(t.qtyEth, 2)}</td>
-              <td className="num">{num(t.entryPrice)}</td>
-              <td className="num">{t.status === 'closed' ? num(t.exitPrice) : t.status === 'open' ? <Tag>open</Tag> : <Tag kind="warn">{t.status}</Tag>}</td>
-              <td>{t.exitReason?.replace(/_/g, ' ') ?? '—'}</td>
-              <td className="num">{duration(t.holdMs)}</td>
-              <td className="num">{t.grossPnl === null ? '—' : signedUsd(t.grossPnl)}</td>
-              <td className="num">{t.fees === null ? '—' : usd(t.fees)}</td>
-              <td className="num"><Pnl v={t.netPnl} /></td>
-              <td className="num">{t.netPnlInr === null ? '—' : inr(t.netPnlInr)}</td>
+    <>
+      <TradeCards rows={rows} live={live} windowMin={windowMin} />
+      <div className="table-wrap trades-table">
+        <table className="sticky-first">
+          <thead>
+            <tr>
+              <th>Opened</th><th>Side</th><th className="num">Qty ETH</th><th className="num">Entry</th><th className="num">Exit</th><th>Exit reason</th>
+              <th className="num">Hold</th><th className="num">Gross</th><th className="num">Fees</th>
+              <th className="num">Entry fee</th><th className="num">{live ? 'Exit fee (exchange)' : 'Exit fee'}</th>
+              <th className="num">Net</th><th className="num">Net ₹</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id}>
+                <td>{timeShort(t.entryTs)}</td>
+                <td>{t.side === 'long' ? '▲ Long' : '▼ Short'}</td>
+                <td className="num">{num(t.qtyEth, 2)}</td>
+                <td className="num">{num(t.entryPrice)}</td>
+                <td className="num">{t.status === 'closed' ? num(t.exitPrice) : t.status === 'open' ? <Tag>open</Tag> : <Tag kind="warn">{t.status}</Tag>}</td>
+                <td>{t.exitReason?.replace(/_/g, ' ') ?? '—'}</td>
+                <td className="num">{duration(t.holdMs)}</td>
+                <td className="num">{t.grossPnl === null ? '—' : signedUsd(t.grossPnl)}</td>
+                <td className="num">{t.fees === null ? '—' : usd(t.fees, 3)}</td>
+                <td className="num">{t.entryFee === null || t.entryFee === undefined ? '—' : usd(t.entryFee, 3)}</td>
+                <td className="num">{t.status === 'closed' ? <ExitFeeCell t={t} windowMin={windowMin} live={live} /> : <span className="muted">—</span>}</td>
+                <td className="num"><Pnl v={t.netPnl} /></td>
+                <td className="num">{t.netPnlInr === null ? '—' : inr(t.netPnlInr)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 
 export default function DemoPanel({ state, actions }: { state: BotState; actions: Actions }) {
   const d = state.demo;
   const trades = useTrades('demo');
+  const now = useServerNow(state.now);
   if (!d) return <div className="card" style={{ marginTop: 12 }}>Demo account not initialised yet (worker starting)…</div>;
 
   const pos = d.openPosition;
@@ -100,10 +159,15 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
   const mark = pos && q ? (pos.side === 'long' ? q.bid : q.ask) : null;
   const unrealGross = pos && mark !== null ? dir * (mark - pos.entryPrice) * pos.qtyEth : null;
   const rates = state.economics?.rates ?? { taker: state.spec.takerFeeRate, gst: state.settings.execution.gstRate };
-  const estExitFee = pos && mark !== null ? mark * pos.qtyEth * (state.settings.execution.takerFeeRate ?? rates.taker) * (1 + rates.gst) : null;
-  const heldMs = pos ? state.now - pos.entryTs : 0;
-  const maxHoldMs = state.settings.exits.maxHoldMinutes * 60_000;
+  const v = scalperView(state, 'demo');
+  const heldMs = pos ? Math.max(0, now - pos.entryTs) : 0;
+  // the time exit is clamped to window - margin while the offer is assumed (28.5 min, not the raw 30)
+  const maxHoldMs = v.effectiveMaxHoldMin * 60_000;
+  const waivedNow = !!pos && v.effective && feeWindow(pos.entryTs, v.windowMin, now).remainingMs > 0;
+  const takerExitFee = pos && mark !== null ? mark * pos.qtyEth * (state.settings.execution.takerFeeRate ?? rates.taker) * (1 + rates.gst) : null;
+  const estExitFee = waivedNow ? 0 : takerExitFee;
   const closed = trades?.filter((t) => t.status === 'closed') ?? [];
+  const savedSum = closed.reduce((a, t) => a + (t.exitFeeSaved ?? t.meta?.exitFeeSaved ?? 0), 0);
   const wins = closed.filter((t) => (t.netPnl ?? 0) > 0).length;
   const realized = d.balanceUsd - d.startingBalanceUsd + (pos?.entryFee.total ?? 0);
   const sig = state.evaluation?.signal;
@@ -137,12 +201,12 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
           </div>
           <div className="grid g-4" style={{ marginTop: 14 }}>
             <Stat label="Realised P&L" value={<Pnl v={realized} />} sub={`balance ${usd(d.balanceUsd)}`} />
-            <Stat label="Unrealised (gross)" value={<Pnl v={unrealGross ?? d.unrealizedPnlUsd} />} sub={pos ? `est. exit fee ${usd(estExitFee, 3)}` : 'flat'} />
-            <Stat label="Fees paid (simulated)" value={usd(d.totalFeesUsd)} sub="maker/taker + GST" />
+            <Stat label="Unrealised (gross)" value={<Pnl v={unrealGross ?? d.unrealizedPnlUsd} />} sub={pos ? (waivedNow ? 'exit fee free (offer, assumed)' : `est. exit fee ${usd(estExitFee, 3)}`) : 'flat'} />
+            <Stat label="Fees paid (simulated)" value={usd(d.totalFeesUsd)} sub={v.effective ? 'entry fee + GST; closing free ≤ ' + v.windowMin + ' min (assumed)' : 'maker/taker + GST'} />
             <Stat label="Max drawdown" value={pctRaw(d.maxDrawdownPct, 2)} sub={`peak ${usd(d.peakEquityUsd)}`} />
             <Stat label="Win rate (last 60)" value={closed.length ? pctRaw((wins / closed.length) * 100, 0) : '—'} sub={`${wins}/${closed.length} trades`} />
             <Stat label="Trades · rolling 24h" value={<>{d.tradesLast24h}<span className="muted"> / {state.settings.limits.maxTradesPer24h}</span></>} sub={<Meter value={d.tradesLast24h} max={state.settings.limits.maxTradesPer24h} label="Trades in rolling 24 hours" />} />
-            <Stat label="Leverage · quantity" value={`${state.settings.position.leverage}x · ${state.settings.position.quantityEth} ETH`} sub={`${state.economics?.contracts ?? '—'} contracts × ${state.spec.contractValue} ETH`} />
+            <Stat label="Leverage" value={`${state.settings.position.leverage}x`} sub={`${state.settings.position.quantityEth} ETH = ${state.economics?.contracts ?? '—'} contracts × ${state.spec.contractValue} ETH`} />
             <Stat label="Bot" value={state.running ? 'Running' : 'Stopped'} sub={state.running ? 'evaluating each 1m candle' : 'exits still managed'} />
           </div>
         </Card>
@@ -157,15 +221,18 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
                   <tr><td className="sec">Mark (exit side)</td><td className="num">{num(mark)}</td></tr>
                   <tr><td className="sec">Target · Stop</td><td className="num">{num(pos.targetPrice)} · {num(pos.stopPrice)}{pos.breakevenArmed ? ' (break-even)' : ''}</td></tr>
                   <tr><td className="sec">Gross P&L</td><td className="num"><Pnl v={unrealGross} /></td></tr>
-                  <tr><td className="sec">Entry fee (simulated) · est. exit fee</td><td className="num">{usd(pos.entryFee.total, 3)} · {usd(estExitFee, 3)}</td></tr>
+                  <tr><td className="sec">Entry fee (simulated, paid)</td><td className="num">{usd(pos.entryFee.total, 3)}</td></tr>
+                  <tr><td className="sec">Exit fee if closed now</td><td className="num">{waivedNow ? <b className="good">FREE (Scalper Offer)</b> : <>{usd(estExitFee, 3)} <span className="muted">(est.{v.effective ? ', window ended' : ', offer off'})</span></>}</td></tr>
                   <tr><td className="sec">Net if closed now</td><td className="num"><Pnl v={unrealGross !== null && estExitFee !== null ? unrealGross - pos.entryFee.total - estExitFee : null} /></td></tr>
                   <tr><td className="sec">Liquidation (est.)</td><td className="num">{num(pos.liquidationPrice)}</td></tr>
                   <tr><td className="sec">Max favourable move</td><td className="num">${num(pos.mfe)} of ${num(pos.targetMoveUsd)} target</td></tr>
                 </tbody>
               </table>
-              <div style={{ marginTop: 8 }}>
-                <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between' }}><span>Holding time</span><span className="tabnum">{duration(heldMs)} / {duration(maxHoldMs)}</span></div>
+              {v.effective && <div style={{ marginTop: 10 }}><ExitFeeClock entryTs={pos.entryTs} windowMin={v.windowMin} now={now} /></div>}
+              <div style={{ marginTop: 10 }}>
+                <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Holding time{v.clamped ? ' · time exit' : ''}</span><span className="tabnum">{duration(heldMs)} / {duration(maxHoldMs)}</span></div>
                 <Meter value={heldMs} max={maxHoldMs} label="Holding time used" />
+                {v.clamped && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>The time exit fires at {duration(maxHoldMs)} (configured {state.settings.exits.maxHoldMinutes} min, shortened by the {v.marginSec} s safety margin) so even that close stays inside the {v.windowMin}-min fee-free window.</div>}
               </div>
               {actions.isAdmin && <button className="btn sm" style={{ marginTop: 10 }} onClick={() => actions.run('Close', () => api('POST', 'demo/close'), 'Simulated position closed')}>Close simulated position</button>}
             </>
@@ -173,6 +240,9 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
             <div>
               <p style={{ marginTop: 0 }}>
                 <b>No open simulated position.</b> The bot opens a trade only when every strategy condition passes <i>and</i> the risk manager approves — it never trades just to use the daily quota.
+              </p>
+              <p className="sec" style={{ fontSize: 12 }}>
+                {v.effective ? <>A trade closed within {v.windowMin} min pays <b>no closing fee</b>, only the entry fee (Delta Scalper Offer — assumed).</> : <>Scalper Offer switched off: both the entry and the closing fee are charged.</>}
               </p>
               <div className="sec">Latest signal: {sig ? <b>{sig.side.toUpperCase()} @ {num(sig.refPrice)} (target ${num(sig.targetMoveUsd)}, stop ${num(sig.stopMoveUsd)})</b> : <b>none</b>}</div>
               {d.lastDecision && (
@@ -206,6 +276,10 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
       </div>
 
       <div className="grid">
+        <FeeRealityCard state={state} wide />
+      </div>
+
+      <div className="grid">
         <Card title="Signal diagnostics" hint={state.evaluation ? `Evaluated candle ${timeShort(state.evaluation.candleTime)} · regime ${state.evaluation.regime.replace('_', ' ')} · ATR $${num(state.evaluation.atr)}` : undefined}>
           <ConditionList state={state} />
         </Card>
@@ -227,7 +301,12 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
             </div>
           }
         >
-          <TradesTable rows={trades} mode="demo" />
+          {(v.effective || savedSum > 0) && closed.length > 0 && (
+            <p className="saved-strip">
+              <b>Closing fees saved by the Scalper Offer:</b> <span className="tabnum good">{usd(savedSum, 3)}</span> over these {closed.length} closed trades <span className="muted">(simulated — assumes the offer)</span>
+            </p>
+          )}
+          <TradesTable rows={trades} mode="demo" windowMin={v.windowMin} />
         </Card>
       </div>
     </div>

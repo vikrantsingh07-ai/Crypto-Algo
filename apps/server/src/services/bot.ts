@@ -1,4 +1,4 @@
-import { breakevenWinRate, estimateEconomics, evaluateLatest, feeConfigFrom, quantityToContracts, riskSummary, type ContractSpec, type Evaluation, type Quote, type Settings } from '@cryptoalgo/core';
+import { breakevenWinRate, effectiveMaxHoldMs, estimateEconomics, evaluateLatest, feeConfigFrom, quantityToContracts, riskSummary, type ContractSpec, type Evaluation, type Quote, type Settings } from '@cryptoalgo/core';
 import type { DeltaEndpoints, DeltaHttp, Logger, MarketFeed } from '@cryptoalgo/delta';
 import type { AppConfig } from '../config';
 import { randomId } from '../crypto';
@@ -88,6 +88,7 @@ export class Bot {
     // a fresh install is always Demo with live disarmed
     if (!(await this.d.repos.getDoc('bot_state'))) await this.d.repos.saveBotState(this.state);
     await this.d.repos.failStaleBacktests();
+    await this.d.live.loadWaiver(); // standby instances show the persisted Scalper Offer status too
   }
 
   async start(): Promise<void> {
@@ -323,20 +324,28 @@ export class Bot {
   }
 
   // ------------------------------------------------------------------ dashboard snapshot
-  /** "Fee reality check": what each target size is worth after maker/taker fees + GST at the current price. */
+  /**
+   * "Fee reality check": what each target size is worth after maker/taker fees + GST at the current price.
+   * The main tables follow the DEMO fee configuration (Scalper Offer waiver while it is assumed); the `*NoWaiver`
+   * tables show the same trades with a full closing fee, which is what live falls back to if Delta turns out not to
+   * waive it. `scalper.liveEffective` says which of the two live is currently gating on.
+   */
   private economics(settings: Settings, spec: ContractSpec, quote: Quote | null) {
     const contracts = quantityToContracts(settings.position.quantityEth, spec.contractValue);
     if (!contracts || !quote) return null;
     const px = quote.last;
     const fees = feeConfigFrom(settings, spec);
+    const noWaiver = feeConfigFrom(settings, spec, { waiverOverride: false });
+    const waived = feeConfigFrom(settings, spec, { waiverOverride: true });
     const t = settings.targets;
     const stop = (t.stopLossMinUsd + t.stopLossMaxUsd) / 2;
     const moves = [t.targetMoveMinUsd, (t.targetMoveMinUsd + t.targetMoveMaxUsd) / 2, t.targetMoveMaxUsd];
-    const row = (move: number, targetRole: 'maker' | 'taker') => {
-      const e = estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + move, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole, stopSlippageUsd: settings.execution.simStopSlippageUsd }, fees);
+    const row = (move: number, targetRole: 'maker' | 'taker', cfg = fees) => {
+      const e = estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + move, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole, stopSlippageUsd: settings.execution.simStopSlippageUsd }, cfg);
       return { moveUsd: move, grossReward: e.rewardGross, fees: e.feeIfTarget, netReward: e.rewardNet, netRewardRisk: e.netRewardRisk, requiredWinRate: breakevenWinRate(e.rewardNet, e.riskNet) };
     };
-    const be = (role: 'maker' | 'taker') => estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + 5, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole: role }, fees).breakevenMoveUsd;
+    const be = (role: 'maker' | 'taker', cfg = fees) => estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + 5, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole: role }, cfg).breakevenMoveUsd;
+    const w = settings.execution.exitFeeWaiver;
     return {
       referencePrice: px,
       contracts,
@@ -347,6 +356,18 @@ export class Bot {
       breakevenMoveTakerExitUsd: be('taker'),
       rates: { maker: fees.makerRate, taker: fees.takerRate, gst: fees.gstRate },
       verifiedSpec: spec.verified,
+      scalper: {
+        assumed: w.enabled,
+        effective: w.enabled,
+        liveEffective: this.d.live.waiverEffective(),
+        windowMinutes: w.withinMinutes,
+        safetyMarginSeconds: w.safetyMarginSeconds,
+        effectiveMaxHoldMinutes: effectiveMaxHoldMs(settings, w.enabled) / 60_000,
+      },
+      makerTargetNoWaiver: moves.map((m) => row(m, 'maker', noWaiver)),
+      takerTargetNoWaiver: moves.map((m) => row(m, 'taker', noWaiver)),
+      breakevenMoveNoWaiverMakerExitUsd: be('maker', noWaiver),
+      breakevenMoveWaivedUsd: be('taker', waived),
     };
   }
 

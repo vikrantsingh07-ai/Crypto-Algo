@@ -1,6 +1,6 @@
 # Self-hosting on a VPS (recommended: a small server in Tokyo/Singapore with a STATIC public IP,
 # because Delta requires IP whitelisting for API keys with trading permission).
-#   cp .env.example .env   # fill in the values
+#   cp .env.example .env   # fill in the values (single-quote a bcrypt hash: ADMIN_PASSWORD_HASH='$2b$12$...')
 #   docker compose up -d --build
 services:
   db:

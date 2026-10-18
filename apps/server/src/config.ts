@@ -1,11 +1,16 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import type { DeltaEnvName } from '@cryptoalgo/delta';
+import { parseEncryptionKey } from './crypto';
 
 /**
  * Server configuration, read once from environment variables.
  * Secrets (API keys, session secret, encryption key) are ONLY ever read here, on the server.
  */
+
+export const MIN_PROD_ADMIN_PASSWORD_LENGTH = 12;
+/** $2a$/$2b$/$2y$ + two-digit cost + 53 hash characters. */
+const BCRYPT_HASH = /^\$2[abxy]\$\d{2}\$[./A-Za-z0-9]{53}$/;
 
 const bool = (def: boolean) =>
   z
@@ -26,11 +31,16 @@ const EnvSchema = z.object({
   SESSION_SECRET: z.string().optional(),
   SESSION_TTL_HOURS: z.coerce.number().min(0.25).max(168).default(12),
   CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
-  PROXY_SHARED_SECRET: z.string().optional(),
+  /** Trimmed: a pasted trailing space or newline must not make the dashboard proxy and the API disagree. */
+  PROXY_SHARED_SECRET: z.string().optional().transform((v) => v?.trim() || undefined),
 
   ADMIN_USERNAME: z.string().default('admin'),
   ADMIN_PASSWORD_HASH: z.string().optional(),
-  /** Development convenience only; rejected in production. */
+  /**
+   * Plain-text admin password. Development convenience; in production it is accepted only when
+   * ADMIN_PASSWORD_HASH is not set and it has at least MIN_PROD_ADMIN_PASSWORD_LENGTH characters
+   * (it is hashed at startup; prefer ADMIN_PASSWORD_HASH).
+   */
   ADMIN_PASSWORD: z.string().optional(),
   VIEWER_USERNAME: z.string().default('viewer'),
   VIEWER_PASSWORD_HASH: z.string().optional(),
@@ -54,8 +64,6 @@ const EnvSchema = z.object({
   BOT_AUTOSTART: bool(true),
   /** Allow this instance to run the trading worker (set false on API-only replicas). */
   WORKER_ENABLED: bool(true),
-  /** Extra origins allowed for CORS (comma separated). Empty = same-origin / server-to-server only. */
-  CORS_ORIGINS: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -92,6 +100,13 @@ export function loadConfig(source: Record<string, string | undefined> = process.
   const isProd = env.NODE_ENV === 'production';
   const warnings: string[] = [];
 
+  if (env.DATABASE_URL !== undefined) {
+    // Copy-paste from a phone often brings along spaces or quotes; a whole `psql '...'` command is rejected without echoing it.
+    const url = env.DATABASE_URL.trim().replace(/^(['"])(.*)\1$/, '$2').trim();
+    if (!/^postgres(ql)?:\/\/\S+$/.test(url)) throw new Error('DATABASE_URL must be a single connection string starting with postgresql:// (copy only the URL, without psql, quotes or spaces)');
+    env.DATABASE_URL = url;
+  }
+
   let sessionSecret = env.SESSION_SECRET ?? '';
   if (sessionSecret.length < 32) {
     if (isProd) throw new Error('SESSION_SECRET must be set to a random string of at least 32 characters in production');
@@ -101,8 +116,7 @@ export function loadConfig(source: Record<string, string | undefined> = process.
 
   let encryptionKey: Buffer | null = null;
   if (env.CREDENTIAL_ENCRYPTION_KEY) {
-    encryptionKey = Buffer.from(env.CREDENTIAL_ENCRYPTION_KEY, 'base64');
-    if (encryptionKey.length !== 32) throw new Error('CREDENTIAL_ENCRYPTION_KEY must be 32 bytes, base64-encoded (e.g. `openssl rand -base64 32`)');
+    encryptionKey = parseEncryptionKey(env.CREDENTIAL_ENCRYPTION_KEY);
   } else if (!isProd) {
     encryptionKey = Buffer.alloc(32, 7);
     warnings.push('CREDENTIAL_ENCRYPTION_KEY not set: using an insecure development key');
@@ -110,10 +124,27 @@ export function loadConfig(source: Record<string, string | undefined> = process.
     warnings.push('CREDENTIAL_ENCRYPTION_KEY not set: dashboard-stored API credentials are disabled (use DELTA_API_KEY / DELTA_API_SECRET)');
   }
 
-  if (isProd && env.ADMIN_PASSWORD) throw new Error('ADMIN_PASSWORD (plaintext) is not allowed in production: set ADMIN_PASSWORD_HASH (npm run hash-password)');
-  if (isProd && !env.ADMIN_PASSWORD_HASH) throw new Error('ADMIN_PASSWORD_HASH must be set in production (generate with: npm run hash-password -- "your password")');
+  if (isProd) {
+    // A plain password pasted into a *_HASH setting (or a hash whose "$" signs a host expanded) would silently lock everyone out.
+    if (env.ADMIN_PASSWORD_HASH && !BCRYPT_HASH.test(env.ADMIN_PASSWORD_HASH)) {
+      throw new Error(`ADMIN_PASSWORD_HASH does not look like a bcrypt hash (it starts with $2b$12$ and is 60 characters). To use a plain password instead, leave it empty and set ADMIN_PASSWORD (at least ${MIN_PROD_ADMIN_PASSWORD_LENGTH} characters)`);
+    }
+    if (env.VIEWER_PASSWORD_HASH && !BCRYPT_HASH.test(env.VIEWER_PASSWORD_HASH)) {
+      throw new Error('VIEWER_PASSWORD_HASH does not look like a bcrypt hash (generate one with: npm run hash-password -- "your password")');
+    }
+    if (env.ADMIN_PASSWORD_HASH) {
+      if (env.ADMIN_PASSWORD) warnings.push('ADMIN_PASSWORD is ignored because ADMIN_PASSWORD_HASH is set (the hash wins); remove ADMIN_PASSWORD from the host settings');
+    } else if (env.ADMIN_PASSWORD) {
+      if (env.ADMIN_PASSWORD.length < MIN_PROD_ADMIN_PASSWORD_LENGTH) throw new Error(`ADMIN_PASSWORD must be at least ${MIN_PROD_ADMIN_PASSWORD_LENGTH} characters in production`);
+      warnings.push('ADMIN_PASSWORD (plain text) is used: it is hashed with bcrypt at startup. Prefer ADMIN_PASSWORD_HASH (npm run hash-password) so the plain password is not kept in the host settings');
+      if (env.ADMIN_PASSWORD !== env.ADMIN_PASSWORD.trim()) warnings.push('ADMIN_PASSWORD starts or ends with a space: the space is part of the password and must be typed at login');
+    } else {
+      throw new Error(`ADMIN_PASSWORD_HASH must be set in production (generate with: npm run hash-password -- "your password"), or set ADMIN_PASSWORD to a password of at least ${MIN_PROD_ADMIN_PASSWORD_LENGTH} characters`);
+    }
+  }
   if (env.DELTA_ENV === 'custom' && !env.DELTA_REST_URL) throw new Error('DELTA_ENV=custom requires DELTA_REST_URL');
   if (isProd && env.MARKET_DATA_SOURCE === 'synthetic') throw new Error('MARKET_DATA_SOURCE=synthetic is for development only and is not allowed in production');
+  if (isProd && env.PROXY_SHARED_SECRET && env.PROXY_SHARED_SECRET.length < 16) warnings.push('PROXY_SHARED_SECRET is shorter than 16 characters: use a long random value (the Render Blueprint generates one)');
   if (isProd && !env.PROXY_SHARED_SECRET) warnings.push('PROXY_SHARED_SECRET not set: anyone who can reach this API directly can attempt logins; set the same secret here and on Vercel so only the dashboard proxy can call it');
   if (isProd && !env.DATABASE_URL) warnings.push('DATABASE_URL not set: using embedded PGlite storage (single instance only). Use managed Postgres in production.');
 

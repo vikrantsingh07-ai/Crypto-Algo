@@ -131,6 +131,7 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
 .tab { appearance: none; border: 0; background: transparent; padding: 10px 14px; font-weight: 600; color: var(--ink-2); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; min-height: 44px; }
 .tab[aria-selected='true'] { color: var(--ink); border-bottom-color: var(--accent); }
 .tab.livetab[aria-selected='true'] { border-bottom-color: var(--status-critical); }
+.tab .short { display: none; }
 
 /* ---------- banners ---------- */
 .banner { border-radius: var(--radius); padding: 10px 14px; margin-top: 12px; border: 1px solid var(--border); display: flex; gap: 10px; align-items: flex-start; }
@@ -170,6 +171,7 @@ code, .mono { font-family: var(--mono); font-size: 0.92em; }
 .tag.good { border-color: var(--status-good); background: var(--good-wash); color: var(--good-text); }
 .tag.crit { border-color: var(--status-critical); background: var(--crit-wash); color: var(--bad-text); }
 
+.stat.wide { grid-column: 1 / -1; }
 .stat .label { color: var(--ink-2); font-size: 12px; }
 .stat .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
 .stat .sub { color: var(--ink-muted); font-size: 12px; margin-top: 2px; }
@@ -218,6 +220,7 @@ table.kv td.num { text-align: right; }
 .mark { flex: none; width: 18px; text-align: center; font-weight: 800; }
 .mark.ok { color: var(--good-text); }
 .mark.no { color: var(--bad-text); }
+.mark.info { color: var(--accent); }
 
 /* ---------- meter ---------- */
 .meter { height: 8px; border-radius: 999px; background: var(--accent-wash); overflow: hidden; }
@@ -249,12 +252,98 @@ table.kv td.num { text-align: right; }
 .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .linkbtn { appearance: none; border: 0; background: none; color: var(--accent); cursor: pointer; font-size: 12px; padding: 4px; }
 
+/* ---------- Scalper Offer (closing-fee waiver) ---------- */
+.pill { display: inline-flex; align-items: flex-start; gap: 6px; font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-2); max-width: 100%; line-height: 1.3; }
+.pill.warn { border-color: var(--status-warning); background: var(--warn-wash); color: var(--ink); }
+.pill.good { border-color: var(--status-good); background: var(--good-wash); color: var(--good-text); }
+.pill.crit { border-color: var(--status-critical); background: var(--crit-wash); color: var(--bad-text); }
+.pill.off { color: var(--ink-2); }
+.fee-clock { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--status-good); background: var(--good-wash); color: var(--good-text); line-height: 1.35; }
+.fee-clock b[aria-hidden] { flex: none; }
+.fee-clock.warn { border-color: var(--status-warning); background: var(--warn-wash); color: var(--ink); }
+.fee-clock.crit { border-color: var(--status-critical); background: var(--crit-wash); color: var(--bad-text); font-weight: 600; }
+.fee-clock.off { border-color: var(--border); background: var(--surface-2); color: var(--ink-2); }
+.sub { font-size: 11px; color: var(--ink-muted); font-weight: 400; line-height: 1.25; }
+.warn-text { color: var(--ink); background: var(--warn-wash); border-radius: 4px; padding: 0 4px; display: inline-block; }
+.terms { margin-top: 12px; font-size: 12px; color: var(--ink-2); border-top: 1px solid var(--grid); padding-top: 8px; }
+.terms summary { cursor: pointer; font-weight: 600; min-height: 44px; display: flex; align-items: center; }
+.terms ul { margin: 4px 0 6px; padding-left: 18px; }
+.terms li { margin-bottom: 4px; }
+.terms p { margin: 6px 0 0; }
+.confirm-box { border: 1px solid var(--status-warning); background: var(--warn-wash); border-radius: 10px; padding: 10px 12px; }
+.note-box { margin-top: 10px; font-size: 12px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-2); }
+.note-box.warn { border-color: var(--status-warning); background: var(--warn-wash); color: var(--ink); }
+.saved-strip { margin: 0 0 8px; font-size: 13px; }
+.pill-row { display: flex; }
+.fee-sentence { margin: 0 0 8px; font-size: 14px; }
+.fee-foot { font-size: 12px; margin: 8px 0 0; }
+.fee-layout { display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 900px) { .fee-wide .fee-layout { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: 20px; align-items: start; } }
+table.cmp th { white-space: normal; vertical-align: bottom; line-height: 1.2; }
+table.cmp th.grp { text-align: center; font-size: 12px; border-bottom: 2px solid var(--axis); }
+table.cmp th.grp.with, table.cmp td.with, table.cmp th.with { background: var(--accent-wash); }
+table.cmp th.grp.without, table.cmp td.without, table.cmp th.without { background: var(--surface-2); }
+table.cmp td { white-space: normal; vertical-align: top; }
+table.cmp .sub { white-space: nowrap; }
+.trade-cards { display: none; list-style: none; margin: 0; padding: 0; }
+.trade-cards li { padding: 10px 0; border-bottom: 1px solid var(--grid); }
+.trade-cards li:last-child { border-bottom: 0; }
+.tc-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.tc-head .tc-net { margin-left: auto; font-weight: 700; font-size: 15px; }
+.tc-line { font-size: 12px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.tc-fees { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; margin-top: 6px; align-items: center; }
+.tc-exit { display: inline-flex; align-items: center; gap: 6px; }
+.tc-exit .sub { display: inline; margin-left: 2px; }
+table.cmp tr.be-row td { border-top: 2px solid var(--axis); font-weight: 600; }
+table.sticky-first th:first-child, table.sticky-first td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; box-shadow: 1px 0 0 var(--grid); }
+
 /* ---------- login ---------- */
 .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
 .login-card { width: 100%; max-width: 380px; }
 
 @media (max-width: 759px) { .topbar { position: static; } }
+/* ---------- phone (390px) ---------- */
+@media (max-width: 759px) {
+  .shell { padding: 0 12px 40px; }
+  .tab { padding: 10px 6px; flex: 1; text-align: center; }
+  .tab .long { display: none; }
+  .tab .short { display: inline; }
+  .tabs.wrap .tab { white-space: normal; line-height: 1.2; padding: 8px 6px; }
+  .btn.sm { min-height: 40px; padding: 6px 12px; }
+  .linkbtn { min-height: 40px; padding: 8px; }
+  input[type='number'], input[type='text'], input[type='password'], select { min-height: 44px; font-size: 16px; }
+  .check-row { min-height: 44px; align-items: center; }
+  input[type='checkbox'] { width: 22px; height: 22px; flex: none; }
+  .card { padding: 12px; }
+  .card > header { align-items: flex-start; }
+  .mode-status { min-width: 0; flex-basis: 100%; }
+  .top-actions { width: 100%; }
+  .top-actions .tabnum { flex-basis: 100%; }
+  /* key/value tables: label above value instead of a cramped 46/54 split */
+  table.kv, table.kv tbody, table.kv tr, table.kv td { display: block; width: auto !important; text-align: left !important; }
+  table.kv tr { padding: 6px 0; border-bottom: 1px solid var(--grid); }
+  table.kv tr:last-child { border-bottom: 0; }
+  table.kv td { border: 0; padding: 0; }
+  table.kv td:first-child { font-size: 12px; }
+  .fee-clock { font-size: 13px; }
+  .modal { padding: 14px 14px; }
+  .statusbar { gap: 4px 12px; }
+  .trade-cards { display: block; }
+  .trades-table { display: none; }
+}
+
 @media (max-width: 520px) {
+  /* with / without comparison: five columns have to fit 330px without hiding the 'without' side */
+  table.cmp { font-size: 12px; }
+  table.cmp th, table.cmp td { padding: 6px 3px; }
+  table.cmp th { font-size: 11px; }
+  table.cmp .sub { font-size: 10px; }
+  table.cmp tr.be-row td:first-child { white-space: nowrap; }
+  .stat .value { font-size: 19px; }
+  /* a banner with an action button: let the button drop under the text instead of squeezing it */
+  .banner { flex-wrap: wrap; }
+  .banner > div { flex: 1 1 200px !important; min-width: 0; }
+  .banner > .btn { margin-left: 22px; }
   .mode-btn { padding: 12px 14px; flex: 1; }
   .mode-switch { width: 100%; }
   .hero { font-size: 38px; }

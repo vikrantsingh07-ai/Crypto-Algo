@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { dayShort, inr, num, pct, pctRaw, signedUsd, timeShort, usd } from '@/lib/format';
+import { minutes, scalperView } from '@/lib/scalper';
 import type { Analytics, BotState, Metrics } from '@/lib/types';
 import { BarChart, HBarChart, LineChart, compact } from './charts';
 import { Card, Pnl, Stat, Tag } from './ui';
@@ -13,7 +14,7 @@ export default function AnalyticsPanel({ state }: { state: BotState }) {
   const [view, setView] = useState<View>('demo');
   return (
     <div>
-      <div className="tabs" role="tablist" style={{ marginTop: 8 }}>
+      <div className="tabs wrap" role="tablist" style={{ marginTop: 8 }}>
         {(
           [
             ['demo', 'Paper trading (simulated)'],
@@ -46,13 +47,23 @@ function TradeAnalytics({ mode, state }: { mode: 'demo' | 'live'; state: BotStat
   if (!data) return <div className="card" style={{ marginTop: 12 }}>Loading analytics…</div>;
   const m = data.metrics;
   const rate = state.settings.execution.usdInrRate;
+  const v = scalperView(state, 'demo');
   return (
     <div>
       <div className="banner info" style={{ marginTop: 12 }}>
         <span className="icon">{mode === 'demo' ? '◇' : '●'}</span>
-        <div><b>{data.label}</b>{mode === 'demo' ? ' — fills, fees and slippage are simulated against live prices; real execution will differ.' : ' — computed from real exchange fills recorded by this bot.'}</div>
+        <div>
+          <b>{data.label}</b>{mode === 'demo' ? ' — fills, fees and slippage are simulated against live prices; real execution will differ.' : ' — computed from real exchange fills recorded by this bot, with the fees Delta actually charged.'}
+          {mode === 'demo' && (
+            <div className="sec" style={{ fontSize: 12, marginTop: 4 }}>
+              {v.assumed
+                ? <><b>Assumption:</b> closing fees are waived on trades closed within {v.windowMin} min (Delta Scalper Offer). Delta does not expose the offer through its API, so these numbers depend on that assumption holding for your account.</>
+                : <>Scalper Offer assumption is <b>off</b>: the full closing fee is counted.</>}
+            </div>
+          )}
+        </div>
       </div>
-      <MetricsBlock m={m} rate={rate} recent={data.recent} drawdown={data.drawdown} state={state} emptyHint={mode === 'demo' ? 'Run the bot in Demo to collect results.' : 'No live trades recorded yet.'} />
+      <MetricsBlock m={m} rate={rate} recent={data.recent} drawdown={data.drawdown} state={state} basis={mode} emptyHint={mode === 'demo' ? 'Run the bot in Demo to collect results.' : 'No live trades recorded yet.'} />
     </div>
   );
 }
@@ -67,7 +78,9 @@ function histogram(values: number[], bins = 12): { label: string; value: number;
   return out.map((b) => ({ ...b, label: `${b.lo >= 0 ? '+' : '−'}${Math.abs(b.lo).toFixed(2)}`, sub: `$${b.lo.toFixed(2)} to $${(b.lo + w).toFixed(2)}` }));
 }
 
-function MetricsBlock({ m, rate, recent, drawdown, state, emptyHint, ddOverride }: { m: Metrics; rate: number; recent?: Analytics['recent']; drawdown?: Analytics['drawdown']; state: BotState; emptyHint: string; ddOverride?: { ts: number; dd: number }[] }) {
+function MetricsBlock({ m, rate, recent, drawdown, state, emptyHint, ddOverride, basis }: { m: Metrics; rate: number; recent?: Analytics['recent']; drawdown?: Analytics['drawdown']; state: BotState; emptyHint: string; ddOverride?: { ts: number; dd: number }[]; basis: 'demo' | 'live' | 'backtest' }) {
+  const v = scalperView(state, basis === 'live' ? 'live' : 'demo');
+  const assumption = basis !== 'live';
   const eq = m.equityCurve.map((p) => ({ x: p.ts, y: p.equity }));
   const spanMs = eq.length > 1 ? eq[eq.length - 1].x - eq[0].x : 0;
   const xAxis = (x: number) => (spanMs < 2 * 86_400_000 ? new Date(x).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }) : dayShort(x));
@@ -91,11 +104,19 @@ function MetricsBlock({ m, rate, recent, drawdown, state, emptyHint, ddOverride 
         <Stat label="Net P&L" value={<Pnl v={m.netPnl} />} sub={inr(m.netPnlInr || m.netPnl * rate)} tone={m.netPnl > 0 ? 'good' : m.netPnl < 0 ? 'bad' : undefined} />
         <Stat label="Profit factor" value={m.profitFactor === null ? '∞' : num(m.profitFactor)} sub={`avg win ${usd(m.avgWin)} · avg loss ${usd(m.avgLoss)}`} />
         <Stat label="Max drawdown" value={pctRaw(m.maxDrawdownPct, 2)} sub={usd(m.maxDrawdownUsd)} />
-        <Stat label="Avg hold" value={`${num(m.avgHoldMinutes, 1)} min`} sub={`limit ${state.settings.exits.maxHoldMinutes} min`} />
+        <Stat label="Avg hold" value={`${num(m.avgHoldMinutes, 1)} min`} sub={`time-exit limit ${minutes(v.effectiveMaxHoldMin)}${v.clamped ? ' (fee-free window)' : ''}`} />
         <Stat label="Reached target" value={pctRaw(m.targetReachedPct, 0)} sub="price hit the target distance" />
         <Stat label="Take-profit exits" value={pctRaw(m.takeProfitPct, 0)} sub="filled by the TP order" />
         <Stat label="Stop-loss exits" value={pctRaw(m.stopLossPct, 0)} sub={`break-even stops ${pctRaw(m.breakevenStopPct, 0)}`} />
         <Stat label="Time exits" value={pctRaw(m.timeExitPct, 0)} sub="closed at the time limit" />
+        {m.feesSavedUsd !== undefined && (
+          <Stat
+            wide
+            label="Closing fees saved (Scalper Offer)"
+            value={<span className="good">{usd(m.feesSavedUsd, 3)}</span>}
+            sub={assumption ? `Assumption-based: ${basis === 'demo' ? 'simulated trades' : 'backtest'} that closed within ${v.windowMin} min are counted as paying no closing fee. Delta does not expose the offer via its API, so verify it in Live.` : 'Live: closing fees the exchange did not charge on trades closed inside the window, estimated as the fee they would have paid. Actual fees paid are in the Fees stat.'}
+          />
+        )}
       </div>
       {m.breakevenWinRate !== null && m.totalTrades > 0 && (
         <p className="sec" style={{ fontSize: 12 }}>Break-even win rate for the realised average win/loss: <b>{pct(m.breakevenWinRate, 1)}</b> (actual {pct(m.winRate, 1)}).</p>
@@ -189,6 +210,11 @@ function Backtests({ state }: { state: BotState }) {
         <div>
           <b>Historical backtests</b> — {synthetic ? <b>this server uses SYNTHETIC data; results are a mechanics check only.</b> : 'downloads public ETH 1-minute candles from Delta Exchange and replays the strategy with the same risk manager, fee model and conservative fill rules as Demo.'}
           {' '}A walk-forward run picks parameters on a training window and reports only the untouched out-of-sample window.
+          <div className="sec" style={{ fontSize: 12, marginTop: 4 }}>
+            {scalperView(state, 'demo').assumed
+              ? <><b>Assumption:</b> closing fees are waived on trades closed within {scalperView(state, 'demo').windowMin} min (Delta Scalper Offer, as supplied by the operator and not verifiable through the API). Results depend on your account having joined it.</>
+              : <>Scalper Offer assumption is <b>off</b>: the full closing fee is counted.</>}
+          </div>
         </div>
       </div>
       <div className="grid g-main">
@@ -251,7 +277,7 @@ function Backtests({ state }: { state: BotState }) {
             )}
             <ul className="sec" style={{ fontSize: 12, marginBottom: 0 }}>{res.assumptions.map((a: string, i: number) => <li key={i}>{a}</li>)}</ul>
           </Card>
-          {oos && <MetricsBlock m={oos} rate={state.settings.execution.usdInrRate} state={state} emptyHint="No out-of-sample trades" ddOverride={(oos as any).drawdownCurve} recent={res.trades?.map((t: any) => ({ ...t }))} />}
+          {oos && <MetricsBlock m={oos} rate={state.settings.execution.usdInrRate} state={state} basis="backtest" emptyHint="No out-of-sample trades" ddOverride={(oos as any).drawdownCurve} recent={res.trades?.map((t: any) => ({ ...t }))} />}
         </div>
       )}
     </div>

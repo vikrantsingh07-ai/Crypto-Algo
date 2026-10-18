@@ -135,7 +135,7 @@ export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): 
     now,
     sleep: ov.sleep,
     logger: (logger as any).child?.('live') ?? logger,
-    onAttention: (m) => void botRef?.addAttention(m).catch(() => {}),
+    onAttention: (m) => botRef?.addAttention(m).catch(() => {}),
   });
   const bot = new Bot({ cfg, repos, logger: (logger as any).child?.('bot') ?? logger, feed, demo, live, creds, http, endpoints, getSettings, getSpec, refreshSpec, now });
   botRef = bot;
@@ -161,6 +161,11 @@ export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): 
     settings = parsed.data;
     await repos.saveSettings(settings);
     if (changed.length) await repos.audit({ actor, role, ip, action: 'settings_changed', details: { changed } });
+    // Any change to the Scalper Offer assumptions invalidates what was observed under the old ones.
+    if (changed.some((c) => c.startsWith('execution.exitFeeWaiver'))) {
+      const { previous, changed: wasSet } = await live.resetWaiver();
+      if (wasSet) await repos.audit({ actor, role, ip, action: 'scalper_offer_status_reset', details: { reason: 'waiver settings changed', previous: { status: previous.status, confirmedCount: previous.confirmedCount } } });
+    }
     return { ok: true, settings, issues, changed };
   };
 

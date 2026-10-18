@@ -1,4 +1,30 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
+
+/** Fixed HKDF domain-separation label. Changing it changes every derived key (stored credentials become unreadable). */
+const KEY_DERIVATION_INFO = 'cryptoalgo/credential-encryption-key/v1';
+/** base64 (standard or URL-safe, padded or not) of exactly 32 bytes: 43 characters plus an optional "=". */
+const BASE64_32_BYTES = /^[A-Za-z0-9+/_-]{43}=?$/;
+
+/**
+ * Turns the CREDENTIAL_ENCRYPTION_KEY setting into the 32-byte AES-256 key.
+ *  - base64 of exactly 32 bytes (`openssl rand -base64 32`) is used as is, as it always was
+ *  - any other secret of at least 32 characters (a 64-char hex string, a password manager's random string, ...)
+ *    is stretched to 32 bytes with HKDF-SHA256, so a phone user does not need openssl
+ * The same input always yields the same key. Error messages never contain the secret.
+ */
+export function parseEncryptionKey(raw: string): Buffer {
+  const secret = raw.trim();
+  if (BASE64_32_BYTES.test(secret)) {
+    const key = Buffer.from(secret, 'base64');
+    if (key.length === 32) return key;
+  }
+  if (secret.length < 32) {
+    throw new Error(
+      `CREDENTIAL_ENCRYPTION_KEY is too short (${secret.length} characters): use base64 of 32 random bytes or any random secret of at least 32 characters (for example a 64-character hex string)`,
+    );
+  }
+  return Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), KEY_DERIVATION_INFO, 32));
+}
 
 /**
  * AES-256-GCM envelope for API credentials stored in the database.

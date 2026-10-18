@@ -1,6 +1,6 @@
 import { buildApi } from './api';
 import { AuthService } from './auth';
-import { loadConfig, loadDotEnv } from './config';
+import { loadConfig, loadDotEnv, type AppConfig } from './config';
 import { createLogger } from './logger';
 import { createRuntime } from './runtime';
 
@@ -10,7 +10,14 @@ import { createRuntime } from './runtime';
  */
 async function main() {
   loadDotEnv();
-  const cfg = loadConfig();
+  let cfg: AppConfig;
+  try {
+    cfg = loadConfig();
+  } catch (e) {
+    // One readable line for the host's log viewer (no stack trace, no values): the message names the setting to fix.
+    process.stderr.write(`Configuration error: ${e instanceof Error ? e.message : String(e)}\nFix this setting in the host's environment variables and redeploy. The server did not start.\n`);
+    process.exit(1);
+  }
   const logger = createLogger(cfg.LOG_LEVEL, 'main');
   for (const w of cfg.warnings) logger.warn(w);
 
@@ -33,7 +40,17 @@ async function main() {
       : st.liveArmed
         ? `LIVE EXECUTION ARMED (${rt.endpoints.label})`
         : `mode=${st.mode}`;
-  logger.info(`▶ ${banner}`, { port: cfg.PORT, exchange: rt.endpoints.label, marketData: cfg.MARKET_DATA_SOURCE, db: rt.db.kind, workerActive: rt.bot.workerActive });
+  // Only yes/no facts about secrets, never their values. (Key names avoid "secret"/"password": the logger redacts those.)
+  logger.info(`▶ ${banner}`, {
+    port: cfg.PORT,
+    exchange: rt.endpoints.label,
+    marketData: cfg.MARKET_DATA_SOURCE,
+    db: rt.db.kind,
+    workerActive: rt.bot.workerActive,
+    liveHardDisabled: cfg.LIVE_HARD_DISABLE,
+    proxyGuard: !!cfg.PROXY_SHARED_SECRET,
+    credentialEncryption: !!cfg.encryptionKey,
+  });
 
   let stopping = false;
   const shutdown = async (signal: string) => {
@@ -53,7 +70,22 @@ async function main() {
   });
 }
 
+/** A one-line hint for the startup failures a first-time deployer actually hits (read in the host's log viewer). */
+function startupHint(e: unknown): string | null {
+  const err = e as { code?: string; message?: string; errors?: Array<{ code?: string }> };
+  const code = err?.code ?? err?.errors?.[0]?.code ?? '';
+  const msg = String(err?.message ?? '');
+  if (/password authentication failed/i.test(msg)) return 'The database rejected the user or password in DATABASE_URL. Copy the connection string again from the database provider.';
+  if (/does not support SSL/i.test(msg)) return 'This database does not use TLS: set DATABASE_SSL=disable.';
+  if (/self[- ]signed|certificate|unable to verify|\bSSL\b|\bTLS\b/i.test(msg)) return 'TLS problem with the database. Make sure DATABASE_URL ends with ?sslmode=require, or set DATABASE_SSL=no-verify (encrypted, certificate not checked).';
+  if (['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code) || /connection terminated|timeout/i.test(msg)) {
+    return 'The server cannot reach the database in DATABASE_URL. Check the host name, that the database is running, and that you copied the whole connection string.';
+  }
+  return null;
+}
+
 main().catch((e) => {
-  process.stderr.write(`Fatal: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n`);
+  const hint = startupHint(e);
+  process.stderr.write(`Fatal: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n${hint ? `Hint: ${hint}\n` : ''}`);
   process.exit(1);
 });

@@ -21,9 +21,9 @@ export function Card({ title, hint, right, children, className = '' }: { title?:
   );
 }
 
-export function Stat({ label, value, sub, tone }: { label: string; value: ReactNode; sub?: ReactNode; tone?: 'good' | 'bad' }) {
+export function Stat({ label, value, sub, tone, wide }: { label: string; value: ReactNode; sub?: ReactNode; tone?: 'good' | 'bad'; wide?: boolean }) {
   return (
-    <div className="card stat">
+    <div className={`card stat ${wide ? 'wide' : ''}`}>
       <div className="label">{label}</div>
       <div className={`value tabnum ${tone ?? ''}`}>{value}</div>
       {sub && <div className="sub">{sub}</div>}

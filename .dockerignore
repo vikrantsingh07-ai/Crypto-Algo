@@ -1,14 +1,18 @@
 node_modules
 **/node_modules
 .git
+.github
 .next
 **/.next
+.vercel
 **/dist
+**/*.tsbuildinfo
 data
 .env
 .env.*
 !.env.example
 docs
 *.md
+# the dashboard is deployed separately on Vercel; only its manifest is needed so the workspace lockfile resolves
 apps/web/*
 !apps/web/package.json

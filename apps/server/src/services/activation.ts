@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  effectiveMaxHoldMs,
   estimateEconomics,
   feeConfigFrom,
   hasErrors,
@@ -62,6 +63,16 @@ export interface ActivationSummary {
   credentialFingerprint: string | null;
   positionPolicyOnSwitchToDemo: string;
   killSwitchAction: string;
+  /**
+   * Delta Scalper Offer (no closing fee when a position is closed within the window). The economics above assume it
+   * while `assumed`; `effectiveMaxHoldMinutes` is the time exit live will use (clamped before the window ends).
+   */
+  scalperOffer: {
+    assumed: boolean;
+    windowMinutes: number;
+    safetyMarginSeconds: number;
+    effectiveMaxHoldMinutes: number;
+  };
 }
 
 export interface PreflightResult {
@@ -100,6 +111,7 @@ export const ACKNOWLEDGEMENTS = [
   'I understand 50x leverage amplifies losses, and that fees (maker/taker plus GST) consume a large part of a $4–$6 price move.',
   'I have run this strategy in Demo mode and reviewed the results; I do not rely on backtests as a guarantee of profit.',
   'I understand the bot can be stopped with the Emergency Kill Switch and that I am responsible for monitoring my account.',
+  'I understand the zero closing fee depends on my Delta account having joined the Scalper Offer; if it has not, closing fees apply and results will be lower than shown.',
 ];
 
 export class LiveActivation {
@@ -129,6 +141,7 @@ export class LiveActivation {
     add('market_data_real', 'Market data is real', !d.feed.synthetic, d.feed.synthetic ? 'The server is running on SYNTHETIC development data. Live trading is impossible.' : 'Real exchange market data.');
     const cs = d.creds.status();
     add('credentials', 'API credentials configured on the server', cs.configured, cs.configured ? `Key ${cs.keyHint} (${cs.fingerprint}) from ${cs.source}.` : 'No API key/secret configured for this environment. Add them in Settings → Exchange connection.');
+    this.addScalperCheck(add);
     add('environment', 'Exchange environment', true, `${d.endpoints.label}${d.endpoints.realMoney ? ' — REAL FUNDS' : ' — sandbox, no real funds'}`, false);
 
     let spec = d.getSpec();
@@ -193,7 +206,8 @@ export class LiveActivation {
     if (contracts !== null && price) {
       const e = estimateEconomics(
         { side: 'long', entryPrice: price, targetPrice: price + (settings.targets.targetMoveMinUsd + settings.targets.targetMoveMaxUsd) / 2, stopPrice: price - settings.targets.stopLossMaxUsd, contracts, contractValue: spec.contractValue, targetRole: settings.exits.takeProfitOrderType === 'limit' ? 'maker' : 'taker' },
-        feeConfigFrom(settings, spec),
+        // the same fee view live gates on: waiver assumed unless the exchange has been seen charging a closing fee
+        feeConfigFrom(settings, spec, { waiverOverride: d.executor.waiverEffective() }),
       );
       breakeven = e.breakevenMoveUsd;
       feeFrac = e.rewardGross > 0 ? e.feeIfTarget / e.rewardGross : null;
@@ -224,17 +238,43 @@ export class LiveActivation {
       credentialFingerprint: cs.fingerprint,
       positionPolicyOnSwitchToDemo: settings.live.modeSwitchPolicy,
       killSwitchAction: settings.live.killSwitchAction,
+      scalperOffer: {
+        assumed: settings.execution.exitFeeWaiver.enabled,
+        windowMinutes: settings.execution.exitFeeWaiver.withinMinutes,
+        safetyMarginSeconds: settings.execution.exitFeeWaiver.safetyMarginSeconds,
+        effectiveMaxHoldMinutes: effectiveMaxHoldMs(settings, d.executor.waiverEffective()) / 60_000,
+      },
     };
 
     const ok = checks.filter((c) => c.blocker).every((c) => c.ok);
     const expiresAt = d.now() + TOKEN_TTL_MS;
-    const token = ok ? this.signToken(actor, this.summaryHash(summary), expiresAt) : null;
+    const token = ok ? this.signToken(actor, this.summaryHash(summary, settings), expiresAt) : null;
     return { ok, checks, summary, token, expiresAt, requiredPhrase: this.requiredPhrase(), acknowledgements: ACKNOWLEDGEMENTS };
   }
 
-  private summaryHash(s: ActivationSummary): string {
+  /** The waiver settings are part of what the operator reviewed: changing any of them invalidates the review token. */
+  private summaryHash(s: ActivationSummary, settings: Settings): string {
     const { referencePrice: _p, availableBalanceUsd: _a, estimatedMarginUsd: _m, feeFractionOfTarget: _f, breakevenMoveUsd: _b, ...stable } = s;
-    return createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 32);
+    return createHash('sha256').update(JSON.stringify({ ...stable, exitFeeWaiver: settings.execution.exitFeeWaiver })).digest('hex').slice(0, 32);
+  }
+
+  /** Non-blocking: the offer can not be read through the API, so this only informs (and shows the current evidence). */
+  private addScalperCheck(add: (id: string, title: string, ok: boolean, detail: string, blocker?: boolean) => void) {
+    const w = this.d.getSettings().execution.exitFeeWaiver;
+    const status = this.d.executor.waiver.status;
+    const diwali = 'The separate "Diwali Scalper Offer" (opening fee returned as a voucher, BTCUSD only) does not apply to this ETHUSD bot and is not modelled.';
+    if (!w.enabled) {
+      add('scalper_offer', 'Scalper Offer (zero closing fee)', true, `Not assumed: the waiver is switched off in Settings, so all economics include the closing fee. ${diwali}`, false);
+      return;
+    }
+    const base = `Estimates assume Delta's Scalper Offer: no closing fee when a position is closed within ${w.withinMinutes} minutes (the opening fee is still paid; the time exit fires at ${(effectiveMaxHoldMs(this.d.getSettings(), this.d.executor.waiverEffective()) / 60_000).toFixed(1)} min). The offer must be joined in your Delta account (trades taken before joining are not eligible, liquidations are not eligible), it cannot be verified through the API and will be verified on the first eligible live close. ${diwali}`;
+    if (status === 'not_applied') {
+      add('scalper_offer', 'Scalper Offer (zero closing fee)', false, `Delta already charged a closing fee on an eligible trade, so live is using full-fee economics. Join the offer in your Delta account and use "Reset & re-check" on the Live panel to verify again. ${base}`, false);
+    } else if (status === 'confirmed') {
+      add('scalper_offer', 'Scalper Offer (zero closing fee)', true, `Confirmed on ${this.d.executor.waiver.confirmedCount} live close(s). ${base}`, false);
+    } else {
+      add('scalper_offer', 'Scalper Offer (zero closing fee)', true, base, false);
+    }
   }
 
   private signToken(actor: string, hash: string, exp: number): string {
@@ -279,7 +319,7 @@ export class LiveActivation {
       await d.repos.audit({ actor: input.actor, role: input.role, ip: input.ip, action: 'live_activation_failed', success: false, details: { error: 'preflight failed', failed: failed.map((c) => ({ id: c.id, detail: c.detail })) } });
       return { ok: false, error: 'Safety checks failed; Live Trading remains disabled', failedChecks: failed };
     }
-    if (opened.hash !== this.summaryHash(pre.summary)) return fail('settings or exchange parameters changed since review; run the checks again');
+    if (opened.hash !== this.summaryHash(pre.summary, d.getSettings())) return fail('settings or exchange parameters changed since review; run the checks again');
 
     const bot = await d.getBotState();
     const next: BotState = {

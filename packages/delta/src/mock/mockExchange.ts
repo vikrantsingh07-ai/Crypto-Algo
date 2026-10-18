@@ -14,8 +14,16 @@ import { generateSignature } from '../signing';
  *   - 429 rate limiting with X-RATE-LIMIT-RESET, failure injection (timeouts, 500s, "processed but
  *     connection dropped") and websocket channels (ob_l1, trades, candlestick_1m, mark_price,
  *     funding_rate, plus authenticated positions/orders/margins/user_trades) with heartbeats
+ *   - an optional model of Delta's "Scalper Offer" (`scalperOffer`, OFF by default): a fill that closes a
+ *     position opened at most `windowMs` earlier (mock clock) reports commission 0
  * It is used by the automated tests and by `npm run dev:mock`. It never talks to the internet.
  */
+
+/** Model of Delta's Scalper Offer inside the mock: closing fills within `windowMs` of the position opening are free. */
+export interface MockScalperOffer {
+  enabled: boolean;
+  windowMs: number;
+}
 
 export interface MockOptions {
   port?: number;
@@ -39,6 +47,13 @@ export interface MockOptions {
   /** Require the User-Agent header like the real CDN does. */
   requireUserAgent?: boolean;
   allowedSkewSec?: number;
+  /**
+   * Model of Delta's "Scalper Offer" (a LOCAL stand-in: nothing here was verified against the real exchange).
+   * When enabled, a fill that CLOSES (reduces) a position that was opened at most `windowMs` earlier on the mock
+   * clock pays no commission; opening fills and closes outside the window pay the normal fee. Default: disabled,
+   * so existing tests keep their meaning.
+   */
+  scalperOffer?: MockScalperOffer;
 }
 
 type FailMode = 'timeout' | 'http500' | 'drop-after-process' | 'drop-before-process' | 'http429';
@@ -103,6 +118,10 @@ export class MockDeltaExchange {
   requestLog: { method: string; path: string; query: string; body: string; authed: boolean; status: number }[] = [];
   /** Orders accepted by POST /v2/orders (for assertions that "no order was placed"). */
   placedOrderRequests: any[] = [];
+  /** Mock-clock time at which the current position was opened (null while flat). */
+  positionOpenedAt: number | null = null;
+  /** Total commission waived by the modelled Scalper Offer so far (USD). */
+  scalperWaivedUsd = 0;
 
   private nextOrderId = 1000;
   private nextFillId = 1;
@@ -131,6 +150,7 @@ export class MockDeltaExchange {
       tradingStatus: 'operational',
       requireUserAgent: true,
       allowedSkewSec: 5,
+      scalperOffer: { enabled: false, windowMs: 30 * 60_000 },
       ...opts,
     };
     this.bid = this.opts.startPrice - 0.05;
@@ -406,6 +426,11 @@ export class MockDeltaExchange {
     };
   }
 
+  private scalperWindowOpen(): boolean {
+    const so = this.opts.scalperOffer;
+    return so.enabled && this.positionOpenedAt !== null && this.nowFn() - this.positionOpenedAt <= so.windowMs;
+  }
+
   private err(code: string, context: unknown = {}): never {
     throw Object.assign(new Error(code), { code, context });
   }
@@ -543,12 +568,19 @@ export class MockDeltaExchange {
     const o = this.opts;
     const buy = order.side === 'buy';
     const rate = role === 'maker' ? o.makerRate : o.takerRate;
-    const commission = qty * o.contractValue * price * rate;
+    const signed = buy ? qty : -qty;
+    const p = this.position;
+    // Scalper Offer: only the part of the fill that CLOSES existing exposure can be waived, and only while the
+    // position is young enough. The part of a flipping fill that opens the other side is charged normally.
+    const closingQty = p.size !== 0 && Math.sign(p.size) !== Math.sign(signed) ? Math.min(Math.abs(p.size), qty) : 0;
+    const waiveClose = closingQty > 0 && this.scalperWindowOpen();
+    const chargedQty = waiveClose ? qty - closingQty : qty;
+    const commission = chargedQty * o.contractValue * price * rate;
+    if (waiveClose) this.scalperWaivedUsd += closingQty * o.contractValue * price * rate;
     this.balance -= commission;
 
     // netting
-    const signed = buy ? qty : -qty;
-    const p = this.position;
+    const wasFlat = p.size === 0;
     if (p.size === 0 || Math.sign(p.size) === Math.sign(signed)) {
       p.entry = (Math.abs(p.size) * p.entry + qty * price) / (Math.abs(p.size) + qty);
       p.size += signed;
@@ -561,6 +593,9 @@ export class MockDeltaExchange {
       if (p.size === 0) p.entry = 0;
       else if (Math.sign(p.size) === Math.sign(signed)) p.entry = price; // flipped
     }
+    // a fresh position (from flat, or the new side after a flip) starts the clock; adding to or partially reducing keeps it
+    if (p.size === 0) this.positionOpenedAt = null;
+    else if (wasFlat || (closingQty > 0 && Math.sign(p.size) === Math.sign(signed))) this.positionOpenedAt = this.nowFn();
 
     const prevFilled = order.size - order.unfilled_size;
     const prevAvg = order.average_fill_price ? Number(order.average_fill_price) : 0;

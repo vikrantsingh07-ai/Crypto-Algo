@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { SignJWT, jwtVerify } from 'jose';
-import type { AppConfig } from './config';
+import { MIN_PROD_ADMIN_PASSWORD_LENGTH, type AppConfig } from './config';
 import { randomId, safeEqual } from './crypto';
 import type { Repos } from './repos';
 
@@ -21,6 +21,8 @@ const MAX_FAILURES = 5;
 /** Failures per username across ALL client IPs (defeats distributed guessing / X-Forwarded-For rotation). */
 const MAX_USER_FAILURES = 20;
 const LOCK_MS = 15 * 60_000;
+/** Same cost as `npm run hash-password`, used when a plain ADMIN_PASSWORD has to be hashed at startup in production. */
+const PROD_BCRYPT_COST = 12;
 // bcrypt hash of a random string: used to keep response time constant for unknown usernames
 const DUMMY_HASH = bcrypt.hashSync(randomId('dummy', 8), 8);
 
@@ -45,8 +47,11 @@ export class AuthService {
     this.key = new TextEncoder().encode(cfg.sessionSecret);
     let generated: string | null = null;
     if (cfg.ADMIN_PASSWORD_HASH) this.users.push({ username: cfg.ADMIN_USERNAME, role: 'admin', hash: cfg.ADMIN_PASSWORD_HASH });
-    else if (cfg.ADMIN_PASSWORD && !cfg.isProd) this.users.push({ username: cfg.ADMIN_USERNAME, role: 'admin', hash: bcrypt.hashSync(cfg.ADMIN_PASSWORD, 10) });
-    else if (!cfg.isProd) {
+    else if (cfg.ADMIN_PASSWORD) {
+      // loadConfig already enforces this; checked again so a short production password can never become a login.
+      if (cfg.isProd && cfg.ADMIN_PASSWORD.length < MIN_PROD_ADMIN_PASSWORD_LENGTH) throw new Error(`ADMIN_PASSWORD must be at least ${MIN_PROD_ADMIN_PASSWORD_LENGTH} characters in production`);
+      this.users.push({ username: cfg.ADMIN_USERNAME, role: 'admin', hash: bcrypt.hashSync(cfg.ADMIN_PASSWORD, cfg.isProd ? PROD_BCRYPT_COST : 10) });
+    } else if (!cfg.isProd) {
       generated = randomId('dev-', 9);
       this.users.push({ username: cfg.ADMIN_USERNAME, role: 'admin', hash: bcrypt.hashSync(generated, 10) });
     }

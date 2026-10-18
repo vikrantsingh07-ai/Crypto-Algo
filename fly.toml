@@ -1,6 +1,9 @@
 # Fly.io: always-on single machine in Tokyo (closest to Delta's AWS Tokyo data centre).
 #   fly launch --no-deploy --copy-config
-#   fly secrets set SESSION_SECRET=... CREDENTIAL_ENCRYPTION_KEY=... ADMIN_PASSWORD_HASH=... PROXY_SHARED_SECRET=... DATABASE_URL=...
+#   fly secrets set SESSION_SECRET=... CREDENTIAL_ENCRYPTION_KEY=... PROXY_SHARED_SECRET=... DATABASE_URL=... \
+#       ADMIN_PASSWORD_HASH='$2b$12$...'      # or: ADMIN_PASSWORD=<at least 12 characters> (hashed at startup)
+#   (SESSION_SECRET / PROXY_SHARED_SECRET: any random string of 32+ characters, CREDENTIAL_ENCRYPTION_KEY: base64 of
+#    32 bytes or any random 32+ character string, e.g. `openssl rand -hex 32` for each)
 #   fly ips allocate-egress --region nrt     # static outbound IPv4 → whitelist it on your Delta API key
 #   fly deploy
 app = 'cryptoalgo-server'

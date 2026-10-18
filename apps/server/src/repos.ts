@@ -79,6 +79,8 @@ export interface TradeRow {
   grossPnl: number | null;
   entryFee: number | null;
   exitFee: number | null;
+  /** Closing fee waived by the Scalper Offer, USD. null on rows stored before the offer was modelled. */
+  exitFeeSaved: number | null;
   fees: number | null;
   slippageCost: number | null;
   funding: number | null;
@@ -114,6 +116,7 @@ function rowToTrade(r: any): TradeRow {
     grossPnl: n(r.gross_pnl),
     entryFee: n(r.entry_fee),
     exitFee: n(r.exit_fee),
+    exitFeeSaved: n(r.exit_fee_saved),
     fees: n(r.fees),
     slippageCost: n(r.slippage_cost),
     funding: n(r.funding),
@@ -147,6 +150,7 @@ export function tradeRowToClosed(t: TradeRow): ClosedTrade {
     grossPnl: t.grossPnl ?? 0,
     entryFee: t.entryFee ?? 0,
     exitFee: t.exitFee ?? 0,
+    exitFeeSaved: t.exitFeeSaved ?? 0,
     fees: t.fees ?? 0,
     slippageCost: t.slippageCost ?? 0,
     funding: t.funding ?? 0,
@@ -213,19 +217,20 @@ export class Repos {
     await q.query(
       `INSERT INTO trades (id, mode, status, side, contracts, qty_eth, leverage, entry_ts, exit_ts, entry_price, exit_price, exit_reason,
          stop_price, target_price, gross_pnl, entry_fee, exit_fee, fees, slippage_cost, funding, net_pnl, net_pnl_inr, hold_ms, mfe, mae,
-         reached_target, regime, reasons, meta, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::jsonb,$29::jsonb, now())
+         reached_target, regime, reasons, meta, exit_fee_saved, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::jsonb,$29::jsonb,$30, now())
        ON CONFLICT (id) DO UPDATE SET
          status=EXCLUDED.status, contracts=EXCLUDED.contracts, qty_eth=EXCLUDED.qty_eth, exit_ts=EXCLUDED.exit_ts, entry_price=EXCLUDED.entry_price,
          exit_price=EXCLUDED.exit_price, exit_reason=EXCLUDED.exit_reason, stop_price=EXCLUDED.stop_price, target_price=EXCLUDED.target_price,
          gross_pnl=EXCLUDED.gross_pnl, entry_fee=EXCLUDED.entry_fee, exit_fee=EXCLUDED.exit_fee, fees=EXCLUDED.fees, slippage_cost=EXCLUDED.slippage_cost,
          funding=EXCLUDED.funding, net_pnl=EXCLUDED.net_pnl, net_pnl_inr=EXCLUDED.net_pnl_inr, hold_ms=EXCLUDED.hold_ms, mfe=EXCLUDED.mfe, mae=EXCLUDED.mae,
-         reached_target=EXCLUDED.reached_target, regime=EXCLUDED.regime, reasons=EXCLUDED.reasons, meta=EXCLUDED.meta, updated_at=now()`,
+         reached_target=EXCLUDED.reached_target, regime=EXCLUDED.regime, reasons=EXCLUDED.reasons, meta=EXCLUDED.meta,
+         exit_fee_saved=EXCLUDED.exit_fee_saved, updated_at=now()`,
       [
         t.id, t.mode, t.status, t.side, t.contracts, t.qtyEth, t.leverage, t.entryTs, t.exitTs ?? null, t.entryPrice ?? null, t.exitPrice ?? null,
         t.exitReason ?? null, t.stopPrice ?? null, t.targetPrice ?? null, t.grossPnl ?? null, t.entryFee ?? null, t.exitFee ?? null, t.fees ?? null,
         t.slippageCost ?? null, t.funding ?? null, t.netPnl ?? null, t.netPnlInr ?? null, t.holdMs ?? null, t.mfe ?? null, t.mae ?? null,
-        t.reachedTarget ?? null, t.regime ?? null, JSON.stringify(t.reasons ?? []), JSON.stringify(t.meta ?? {}),
+        t.reachedTarget ?? null, t.regime ?? null, JSON.stringify(t.reasons ?? []), JSON.stringify(t.meta ?? {}), t.exitFeeSaved ?? null,
       ],
     );
   }
@@ -235,7 +240,7 @@ export class Repos {
       {
         id: c.id, mode: c.mode, status: 'closed', side: c.side, contracts: c.contracts, qtyEth: c.qtyEth, leverage: c.leverage, entryTs: c.entryTs,
         exitTs: c.exitTs, entryPrice: c.entryPrice, exitPrice: c.exitPrice, exitReason: c.exitReason, stopPrice: c.stopPrice, targetPrice: c.targetPrice,
-        grossPnl: c.grossPnl, entryFee: c.entryFee, exitFee: c.exitFee, fees: c.fees, slippageCost: c.slippageCost, funding: c.funding, netPnl: c.netPnl,
+        grossPnl: c.grossPnl, entryFee: c.entryFee, exitFee: c.exitFee, exitFeeSaved: c.exitFeeSaved ?? 0, fees: c.fees, slippageCost: c.slippageCost, funding: c.funding, netPnl: c.netPnl,
         netPnlInr: c.netPnlInr, holdMs: c.holdMs, mfe: c.mfe, mae: c.mae, reachedTarget: c.reachedTarget, regime: c.regime, reasons: c.reasons, meta,
       },
       q,
