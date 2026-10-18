@@ -48,8 +48,11 @@ describe('DeltaWs', () => {
     ws.subscribe([{ name: 'ob_l1', symbols: ['ETHUSD'] }]);
     ws.start();
     await until(() => ws.state === 'ready');
-    ex.setQuote(2999, 3001);
-    await until(() => msgs.some((m) => m.type === 'ob_l1'));
+    // 'ready' only means the socket is up: the subscribe frame may not have reached the mock yet, so keep publishing
+    await until(() => {
+      ex.setQuote(2999, 3001);
+      return msgs.some((m) => m.type === 'ob_l1');
+    });
     expect(msgs.find((m) => m.type === 'ob_l1')).toMatchObject({ bp: '2999', ap: '3001', sy: 'ETHUSD' });
     ws.stop();
   });
@@ -65,8 +68,10 @@ describe('DeltaWs', () => {
     ex.dropWsConnections();
     await until(() => ws.reconnects > before && ws.state === 'ready', 4000);
     msgs.length = 0;
-    ex.setQuote(3010, 3010.1, 3010.05);
-    await until(() => msgs.some((m) => m.type === 'trades'));
+    await until(() => {
+      ex.setQuote(3010, 3010.1, 3010.05);
+      return msgs.some((m) => m.type === 'trades');
+    });
     ws.stop();
   });
 
@@ -132,8 +137,10 @@ describe('DeltaMarketFeed', () => {
     expect(feed.getClosedCandles().at(-1)!.t).toBe((bucketSec - 60) * 1000);
     expect(feed.getFormingCandle()?.t).toBe(bucketSec * 1000);
     await until(() => feed.health().wsState === 'ready');
-    ex.setQuote(3000.9, 3001.1, 3001);
-    await until(() => quotes.length > 0);
+    await until(() => {
+      ex.setQuote(3000.9, 3001.1, 3001);
+      return quotes.length > 0;
+    });
     const q = feed.getQuote()!;
     expect(q.bid).toBe(3000.9);
     expect(q.ask).toBe(3001.1);

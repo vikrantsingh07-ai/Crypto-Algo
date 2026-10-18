@@ -16,3 +16,5 @@ docs
 # the dashboard is deployed separately on Vercel; only its manifest is needed so the workspace lockfile resolves
 apps/web/*
 !apps/web/package.json
+# VM deployment files and their generated .env never go into the image build context
+deploy

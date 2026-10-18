@@ -4,6 +4,8 @@ Yeh guide un operator ke liye hai jo sirf phone ka browser use kar raha hai: Git
 
 Likha gaya: 18 Oct 2026. Har step ke saath yeh bhi likha hai ki kya check ho chuka hai aur kya NAHI (last section "Kya verify NAHI hua" zaroor padho).
 
+> **Oracle Cloud ka VM hai to** Step A (Neon) aur Step B (Render) ki jagah [`docs/ORACLE_CLOUD_HINGLISH.md`](ORACLE_CLOUD_HINGLISH.md) follow karo (backend aur database usi VM par), phir Step C (Vercel) yahin se.
+
 ## 1. Big picture (2 line) aur ek zaroori sach
 
 - Dashboard (website jo aap phone par kholte ho) Vercel par chalti hai. Trading bot + API ek alag, hamesha chalne wale server (backend) par chalte hain, jise Postgres database chahiye.
@@ -211,7 +213,7 @@ Jo sandbox me asli me chala aur dekha gaya:
 
 Jo verify NAHI hua:
 - Render Blueprint (`render.yaml`) kabhi run nahi hua; sirf YAML syntax check hua aur field naam yaadasht se hain. `railway.json` bhi yaadasht se hai.
-- Docker image asli me build nahi hui (sandbox me Docker daemon nahi). Isliye CI me ek `docker` job joda gaya hai (GitHub par chalega). `docker-compose.yml` sirf `docker compose config` se parse hua.
+- Sandbox me Docker daemon nahi tha, par GitHub CI ke `docker` job ne image sach me build ki (amd64) aur container ka health check pass hua (run on `main`). ARM par aur asli host par nahi chali. `docker-compose.yml` sirf `docker compose config` se parse hua.
 - Asli Postgres (Neon) se connection, pooled vs direct, SSL: kuch test nahi hua. Sirf embedded database aur "host nahi mila" wala failure path chala.
 - Vercel par asli build nahi hua; Root Directory, "Include source files outside of the Root Directory" aur Node version ki jaankari Vercel docs se aur local simulation se hai. Browser se Vercel se backend tak poora chain ek saath nahi chala (sirf backend curl se proxy header ke saath, aur dashboard alag).
 - Delta ke hosts sandbox se unreachable hain. Scalper Offer ke terms, IP whitelisting, API key permissions, Delta ke UI ke shabd: sab operator-diye ya maane hue hain, Delta se verify nahi.

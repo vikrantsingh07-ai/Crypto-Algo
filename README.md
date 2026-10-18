@@ -4,7 +4,7 @@ An automated **ETH perpetual futures scalper** for Delta Exchange (India) with a
 
 > **Starts in `DEMO MODE — LIVE TRADING DISABLED`.** On a fresh install the bot trades only a *virtual* account against live prices with simulated fills and fees. **No real order can be sent** until an administrator completes a multi-step activation workflow (safety checks → review → password + typed phrase). Selecting "Live" in the dashboard never places an order by itself.
 
-**Deploy from a phone (no terminal):** [`docs/SUBAH_DEPLOY_HINGLISH.md`](docs/SUBAH_DEPLOY_HINGLISH.md) is a step-by-step Hinglish guide (Neon Postgres + Render backend + Vercel dashboard) that also lists what was *not* verified. The English reference is [Deployment](#deployment) below.
+**Deploy from a phone (no terminal):** [`docs/SUBAH_DEPLOY_HINGLISH.md`](docs/SUBAH_DEPLOY_HINGLISH.md) is a step-by-step Hinglish guide (Neon Postgres + Render backend + Vercel dashboard) that also lists what was *not* verified. With an Oracle Cloud VM use [`docs/ORACLE_CLOUD_HINGLISH.md`](docs/ORACLE_CLOUD_HINGLISH.md) instead of the Neon/Render steps (`deploy/oracle/`: Postgres + server + Caddy HTTPS on one VM, first-boot script to paste). The English reference is [Deployment](#deployment) below.
 
 **Read this first — honest expectations**
 
@@ -189,7 +189,7 @@ The full version is in [`docs/GO_LIVE_CHECKLIST.md`](docs/GO_LIVE_CHECKLIST.md).
 
 ```bash
 npm run typecheck     # all workspaces
-npm test              # vitest run: core + delta + server (274 tests in 13 files: core 64, delta 65, server 145)
+npm test              # vitest run: core + delta + server (279 tests in 14 files: core 64, delta 65, server 150)
 npx vitest run apps/server/test/scalper.test.ts packages/delta/test/mock-scalper.test.ts   # Scalper Offer only
 npm run build         # server bundle + Next.js production build
 ```
@@ -232,7 +232,7 @@ Backend environment: see [`.env.example`](.env.example) (every variable document
 ## What was and was not verified
 
 **Done and verified here**
-* Full test suite green (274 tests in 13 files, `npx vitest run`, run after the Scalper Offer work) and typechecking of all workspaces; production builds of the server bundle and the Next.js app; boot of the production bundle (refuses to start without secrets; behaves correctly when Delta is unreachable; health, proxy-secret and login rules).
+* Full test suite green (279 tests in 14 files, `npx vitest run`, run after the Scalper Offer work) and typechecking of all workspaces; production builds of the server bundle and the Next.js app; boot of the production bundle (refuses to start without secrets; behaves correctly when Delta is unreachable; health, proxy-secret and login rules).
 * The dashboard exercised in a real browser (login via the proxy, Demo/Live/Settings/Analytics, the whole activation wizard against the mock, kill switch, mobile/dark layout). The Scalper Offer screens were checked at 390 px and 1360 px in light and dark, but against mocked API responses built from the real fee engine, not against the final server.
 * Request signing byte-compatible with Delta's official Python client; endpoints, parameters, WebSocket URLs/channels/auth, rate-limit weights and error codes taken from Delta's official documentation source (github.com/delta-exchange/slate).
 * The Scalper Offer logic (assumption, 28.5-min time exit, verification, fallback to full fees, reset) against the **local mock exchange** and unit tests only.
@@ -240,7 +240,7 @@ Backend environment: see [`.env.example`](.env.example) (every variable document
 **Not verified (could not be, from the build environment)**
 * Any call to the real Delta API (hosts blocked by the sandbox's network policy). Consequently: the real `ETHUSD` `contract_value`/max leverage/fee rates are *read at runtime* (fallback values `0.01 ETH`, `0.05 %/0.02 %` are used only for display until then and block Live); whether Delta lets a reduce-only stop and a reduce-only target coexist at full size; whether fill `commission` already includes GST (Live uses the exchange-reported amount; estimates add GST); the unit of the WebSocket funding rate (assumed percent; used only by Demo); how INR-denominated settlement is presented (`settling_asset`); whether `GET /wallet/balances` works with a Read-only key.
 * **The Scalper Offer itself.** The terms are operator-supplied. A web search (result summaries only) did not contradict them but could not settle: account enrolment (and that KYC and a *Join Now* step are required), whether ETHUSD's window is 30 or 15 minutes, which fill starts the clock, whether stop/take-profit/API closes and maker closing fills qualify, how a waived fee appears in a fill, and whether the testnet has the offer. None of this was checked against Delta.
-* No backtest on real market data; the Docker image was never built here (no Docker daemon in the sandbox; the image layout was validated by hand and a CI job builds it); no deployment to Vercel/Render/Railway/Fly/Neon.
+* No backtest on real market data; the Docker image could not be built in the author's sandbox (no Docker daemon), but the GitHub CI `docker` job builds it (linux/amd64) and its container passes the health check; it was not run on ARM or on a real host; no deployment to Vercel/Render/Railway/Fly/Neon.
 
 ## Known limitations
 
@@ -249,7 +249,7 @@ Backend environment: see [`.env.example`](.env.example) (every variable document
 * ETH perpetuals only, linear (vanilla) contracts, isolated margin, one position at a time by default; cross/portfolio margin, options, and inverse contracts are not supported (inverse is rejected).
 * Funding in Demo uses the feed's rate or a configured fallback; INR figures use a configured rate (no live FX feed).
 * A software backstop exists behind the exchange-side stop, but if the exchange, your host and your network all fail simultaneously, only the exchange-side stop protects you. Delta's "dead man's switch" is deliberately not used because it cancels *all* orders, including protective stops.
-* The Docker image installs its production dependencies from `package.json` ranges rather than the lockfile (it was never built here: no Docker daemon in the sandbox); pin it before relying on it for real money.
+* The Docker image installs its production dependencies from `package.json` ranges rather than the lockfile (CI builds it, but it resolves versions at build time); pin it before relying on it for real money.
 * Extra transaction taxes (e.g. TDS) are configurable (`otherTaxRate`, default 0) but not assumed; income-tax treatment of profits is out of scope.
 * **Scalper Offer:**
   * It is an assumption. Enrolment cannot be read through the API, so the bot cannot know whether your account joined; it learns only from real closes, and the first eligible live close is what exposes a wrong assumption (at the cost of one closing fee).

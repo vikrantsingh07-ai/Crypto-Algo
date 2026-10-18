@@ -1,0 +1,7 @@
+# TLS certificate is requested automatically for the host name in API_HOST
+# (default: <public-ip-with-dashes>.sslip.io, which resolves to that IP; no domain purchase needed).
+{$API_HOST} {
+	encode gzip
+	reverse_proxy server:8080
+	header -Server
+}

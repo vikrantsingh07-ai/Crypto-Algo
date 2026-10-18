@@ -14,3 +14,6 @@ data/
 *.tsbuildinfo
 .DS_Store
 next-env.d.ts
+
+# Oracle/VM deployment secrets (created by deploy/oracle/setup.sh)
+deploy/oracle/.env

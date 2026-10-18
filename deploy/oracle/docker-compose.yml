@@ -1,0 +1,56 @@
+# Backend (API + trading worker) on one always-on VM: Postgres + the server + Caddy for automatic HTTPS.
+# Used by deploy/oracle/setup.sh (docs/ORACLE_CLOUD_HINGLISH.md). Run from this directory; secrets live in ./.env
+# (created by setup.sh, never committed).
+name: cryptoalgo
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cryptoalgo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run deploy/oracle/setup.sh first (it creates .env)}
+      POSTGRES_DB: cryptoalgo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U cryptoalgo']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://cryptoalgo:${POSTGRES_PASSWORD}@db:5432/cryptoalgo
+      DATABASE_SSL: disable
+      NODE_ENV: production
+      PORT: '8080'
+    expose:
+      - '8080' # reachable from Caddy only, never published on the host
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - '80:80' # Let's Encrypt HTTP challenge + redirect to https
+      - '443:443'
+    environment:
+      API_HOST: ${API_HOST:?API_HOST is set by setup.sh}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
