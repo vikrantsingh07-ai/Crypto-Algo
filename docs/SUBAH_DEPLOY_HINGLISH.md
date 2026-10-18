@@ -115,6 +115,7 @@ Repo me `railway.json` hai (Dockerfile builder, health check `/api/health`, 1 re
 3. "Configure Project" screen par:
    - **Framework Preset:** Next.js (apne aap aa jaana chahiye).
    - **Production Branch:** `main` (Project banne ke baad: Settings, Git, Production Branch. GitHub par bhi Settings, Branches, Default branch ko `main` kar do, taaki Vercel/Render apne aap `main` uthayen).
+   - **Agar "Services" / "Multiple applications detected" wali screen aaye** (Root Directory `./`, Application Preset "Services"): ye Vercel ki auto-detection hai, kyunki repo ke root par Dockerfile aur `railway.json` (backend ke liye) hain. Ye ghalat raasta hai. **`apps/web` wali Next.js row ("web-2" / "Next.js") ke saamne "Import single project" dabao**, ya neeche wala Root Directory `apps/web` karo. Wahan "Copy prompt" me jo `vercel.json` suggest hota hai use repo me **mat daalo**. Root Directory `apps/web` hone par Preset apne aap Next.js ho jaata hai.
    - **Root Directory:** "Edit" par tap karo aur `apps/web` chuno. Continue. (Yeh sabse zaroori step hai. Ye na ho to build fail hoga.)
    - Build and Output Settings ko haath mat lagao: `apps/web/vercel.json` install aur build command khud set karta hai (`cd ../.. && npm ci --include=dev` aur `npm run build`).
    - **Node.js Version:** jo default ho woh theek hai (22.x ya naya; Next.js 16 ko 20.9 ya upar chahiye). Agar chunna pade to 22.x.
