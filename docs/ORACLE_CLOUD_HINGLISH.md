@@ -63,6 +63,16 @@ Delta API key (Trading permission) ke liye IP whitelist hota hai. Whitelist me *
 - Backup: database VM ki disk par hai, alag backup nahi. Zaroorat ho to Oracle me boot volume backup lagao.
 - Ye ek hi VM hai: VM band to bot band. Khula real position ho to Live me exchange-side stop order Delta par rehta hai, par phir bhi Live tabhi chalao jab upar ki baatein samajh aa gayi hon.
 
+## Timeout hai to firewall check karo
+
+`ERR_CONNECTION_TIMED_OUT` ka matlab hai ki request VM tak pahunchi hi nahi (agar VM tak pahunchti aur Caddy na chalta to turant "refused" aata). Sabse common wajah: Ingress rules galat jagah lage. Check karo:
+
+1. Laptop par (PowerShell): `Test-NetConnection <VM-IP> -Port 22`, phir `-Port 80`, phir `-Port 443`. (Mac/Linux: `nc -vz -w 5 <VM-IP> 22` aise hi 80, 443.) Port 22 khula ho aur 80/443 nahi, to wajah Security List/NSG hai. Teeno band hon to wajah route/Internet Gateway ya VM ka public IP hai.
+2. Oracle Console: Instance -> **Networking** tab -> Primary VNIC: **Subnet** aur **Network security groups** dekho. Agar VCN purani hai (maslan kisi pehle project ki), to uske subnet par default se alag Security List lagi ho sakti hai: **us subnet ke saath attached har Security List** ke Ingress Rules me `0.0.0.0/0  TCP  80` aur `443` hone chahiye. Agar VNIC par NSG lagi hai to uske Ingress me bhi.
+3. Rule me **Source Type = CIDR, Source CIDR = 0.0.0.0/0, IP Protocol = TCP, Destination Port Range = 80** (443 ke liye alag rule). "Source Port Range" khali chhodo.
+4. Subnet **Public** hona chahiye aur uske Route Table me `0.0.0.0/0 -> Internet Gateway` hona chahiye.
+5. Rules lagne ke baad bhi na chale to doosre network se try karo (phone ka mobile data): kabhi office/college ka network 443 par outbound rok deta hai.
+
 ## Agar kuch na chale
 
 VM ke andar dekhne ke liye (SSH key chahiye jo Step 2 me download ki): Oracle console me upar **Cloud Shell** (`>_`) kholo, menu se private key upload karo, phir:
@@ -79,7 +89,8 @@ cat /opt/cryptoalgo/STATUS.txt                   # BACKEND_URL wagairah (secrets
 | Dikha | Matlab / kya karo |
 |---|---|
 | log me `CHANGE_ME` ya `must be at least` | Script ki do lines theek nahi thi. VM delete karke naye script se banao (ya ssh karke `ADMIN_PASSWORD=... PROXY_SHARED_SECRET=... sudo -E bash /opt/cryptoalgo/deploy/oracle/setup.sh` dobara chalao) |
-| `/api/health` timeout / certificate error | Step 3 (port 80 aur 443) nahi khule, ya certificate abhi ban raha hai. 5 minute ruko |
+| Browser me `ERR_CONNECTION_TIMED_OUT` | Packets Oracle ke firewall par gir rahe hain: port 80/443 ka Ingress rule us subnet par lagta hi nahi. Neeche "Timeout hai to firewall check karo" dekho |
+| `/api/health` certificate error | Certificate abhi ban raha hai: 5 minute ruko |
 | setup log me "NOT healthy after 10 minutes" | `docker compose ... logs server caddy` dekho; screenshot bhejo |
 | Docker build me "Killed" | RAM kam: swap bana ya nahi dekho (`free -m`); ya A1.Flex shape lo |
 | `/api/health` theek, par Vercel login me "backend unreachable" | Vercel `BACKEND_URL` galat/old, ya Redeploy nahi hua |
