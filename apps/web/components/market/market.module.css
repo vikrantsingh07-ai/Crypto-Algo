@@ -1,0 +1,152 @@
+/* Live market components. Colours come from the dashboard tokens in app/globals.css, so light and dark follow the page. */
+
+.root {
+  --of-buy: var(--status-good, #0ca30c);
+  --of-sell: var(--status-critical, #d03b3b);
+  --of-buy-text: var(--good-text, #006300);
+  --of-sell-text: var(--bad-text, #b02a2a);
+  color: var(--ink, #0b0b0b);
+  font-family: var(--font, system-ui, sans-serif);
+  min-width: 0;
+}
+
+/* ---------- shimmer used by every empty state ---------- */
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-2, #f3f2ee) 0%, var(--grid, #e1e0d9) 50%, var(--surface-2, #f3f2ee) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s linear infinite;
+}
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* ---------- price hero ---------- */
+.heroTop { display: flex; justify-content: space-between; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.heroName { font-size: 14px; font-weight: 600; color: var(--ink-2, #52514e); letter-spacing: 0.02em; }
+.heroKind { margin-left: 8px; font-size: 11px; font-weight: 500; color: var(--ink-muted, #898781); }
+.heroRow { display: flex; align-items: baseline; gap: 2px 14px; flex-wrap: wrap; margin-top: 2px; }
+.heroPrice {
+  font-size: clamp(40px, 9.5vw, 60px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.08;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink, #0b0b0b);
+}
+.flashUp { animation: flashUp 0.75s ease-out; }
+.flashDown { animation: flashDown 0.75s ease-out; }
+@keyframes flashUp { 0% { color: var(--of-buy-text); } 100% { color: var(--ink, #0b0b0b); } }
+@keyframes flashDown { 0% { color: var(--of-sell-text); } 100% { color: var(--ink, #0b0b0b); } }
+
+.heroChange { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink-2, #52514e); white-space: nowrap; }
+.heroChange[data-dir='up'] { color: var(--of-buy-text); }
+.heroChange[data-dir='down'] { color: var(--of-sell-text); }
+.heroChangeLabel { margin-left: 4px; font-size: 12px; font-weight: 500; color: var(--ink-muted, #898781); }
+.heroQuote { display: flex; flex-wrap: wrap; gap: 2px 18px; margin-top: 6px; font-size: 13px; color: var(--ink-2, #52514e); font-variant-numeric: tabular-nums; }
+.heroQuote b { color: var(--ink, #0b0b0b); font-weight: 600; }
+
+/* status pill */
+.status {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 600; color: var(--ink-2, #52514e);
+  padding: 3px 10px 3px 9px; border: 1px solid var(--border, rgba(11, 11, 11, 0.1)); border-radius: 999px;
+  background: var(--surface-2, #f3f2ee); white-space: nowrap;
+}
+.dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-muted, #898781); flex: none; }
+.status[data-state='live'] .dot { background: var(--status-good, #0ca30c); }
+.status[data-state='live'] .dot::after {
+  content: ''; position: absolute; inset: -4px; border-radius: 50%;
+  border: 2px solid var(--status-good, #0ca30c); opacity: 0; animation: ping 1.9s ease-out infinite;
+}
+@keyframes ping { 0% { transform: scale(0.45); opacity: 0.75; } 100% { transform: scale(1.35); opacity: 0; } }
+.status[data-state='connecting'] .dot, .status[data-state='fallback'] .dot { background: var(--status-warning, #fab219); }
+.status[data-state='down'] .dot { background: var(--status-critical, #d03b3b); }
+.statusAge { font-weight: 500; color: var(--ink-muted, #898781); }
+
+/* ---------- chart ---------- */
+.chartWrap { position: relative; width: 100%; min-width: 0; }
+.chartSvg { display: block; }
+.chartEmpty {
+  position: absolute; inset: 0; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  font-size: 13px; color: var(--ink-muted, #898781);
+}
+.axisText { font-size: 10.5px; fill: var(--ink-muted, #898781); font-family: var(--mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
+.gridLine { stroke: var(--grid, #e1e0d9); stroke-width: 1; shape-rendering: crispEdges; opacity: 0.8; }
+.up { fill: var(--of-buy); stroke: var(--of-buy); }
+.down { fill: var(--of-sell); stroke: var(--of-sell); }
+.wick { fill: none; stroke-width: 1; shape-rendering: crispEdges; }
+.body { stroke: none; shape-rendering: crispEdges; }
+.lastLine { stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.9; }
+.lastTag { font-size: 11px; font-weight: 700; font-family: var(--mono, ui-monospace, monospace); fill: #fff; }
+.lastDot { fill: var(--ink, #0b0b0b); }
+.posLine { stroke-width: 1.25; stroke-dasharray: 6 4; }
+.posEntry { stroke: var(--ink-2, #52514e); }
+.posStop { stroke: var(--of-sell); }
+.posTarget { stroke: var(--of-buy); }
+.posLabel { font-size: 10.5px; font-weight: 700; font-family: var(--mono, ui-monospace, monospace); }
+.posLabelBg { fill: var(--surface, #fcfcfb); stroke-width: 1; opacity: 0.94; }
+.posEntryText { fill: var(--ink-2, #52514e); }
+.posStopText { fill: var(--of-sell-text); }
+.posTargetText { fill: var(--of-buy-text); }
+
+/* ---------- order flow ---------- */
+.of { display: flex; flex-direction: column; gap: 10px; }
+.ofHead { display: flex; flex-direction: column; gap: 6px; }
+.ofTitleRow { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
+.ofTitle { font-size: 14px; font-weight: 600; }
+.ofHint { font-size: 12px; color: var(--ink-muted, #898781); }
+.pressureLabels { display: flex; justify-content: space-between; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.buyText { color: var(--of-buy-text); }
+.sellText { color: var(--of-sell-text); }
+.pressureBar { position: relative; height: 8px; margin-top: 4px; overflow: hidden; border-radius: 999px; background: var(--of-sell); }
+/* scaleX (compositor-only) instead of animating flex-grow, which would re-layout on every frame of the transition */
+.pressureBuy { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; background: var(--of-buy); transform-origin: left center; transform: scaleX(0.5); transition: transform 0.35s ease; border-right: 2px solid var(--surface, #fcfcfb); }
+.pressureTotals { display: flex; justify-content: space-between; margin-top: 3px; font-size: 11px; color: var(--ink-muted, #898781); font-variant-numeric: tabular-nums; }
+
+.ofBody { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) var(--mid-w, 140px) minmax(0, 1fr); }
+.col { display: flex; flex-direction: column; min-width: 0; position: relative; z-index: 1; }
+.row {
+  position: relative; height: var(--row-h, 26px); display: flex; align-items: center; justify-content: flex-start; gap: 9px;
+  padding: 0 7px; overflow: hidden;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12px; font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--grid, #e1e0d9);
+}
+.row:last-child { border-bottom-color: transparent; }
+.bar { position: absolute; top: 2px; bottom: 2px; left: 0; right: 0; opacity: 0.3; transform: scaleX(0); will-change: transform, opacity; border-radius: 3px; }
+.buy .bar { background: var(--of-buy); transform-origin: left center; }
+.sell .bar { background: var(--of-sell); transform-origin: right center; }
+.rowPrice { position: relative; color: var(--ink-2, #52514e); white-space: nowrap; }
+.rowSize { position: relative; font-weight: 700; color: var(--ink, #0b0b0b); white-space: nowrap; }
+.sell.row { justify-content: flex-end; }
+.compact .row { font-size: 10.5px; padding: 0 4px; gap: 6px; }
+
+.threads { position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; overflow: visible; }
+.thread { fill: none; stroke-linecap: round; stroke-opacity: 0; }
+.threadBuy { stroke: var(--of-buy); }
+.threadSell { stroke: var(--of-sell); }
+
+.mid { position: relative; z-index: 2; display: flex; align-items: center; justify-content: center; min-width: 0; }
+.plate {
+  width: var(--plate-w, 120px); padding: 8px 4px; text-align: center; min-width: 0;
+  background: var(--surface, #fcfcfb); border: 1px solid var(--border, rgba(11, 11, 11, 0.1)); border-radius: 12px; box-shadow: var(--shadow, none);
+}
+.plateLabel { font-size: 10px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--ink-muted, #898781); }
+.platePrice { font-size: 22px; font-weight: 700; line-height: 1.15; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; color: var(--ink, #0b0b0b); }
+.plateSub { font-size: 11px; color: var(--ink-muted, #898781); font-variant-numeric: tabular-nums; line-height: 1.35; }
+.compact .platePrice { font-size: 15px; }
+.compact .plateSub { font-size: 10px; }
+
+.ofNote { font-size: 12px; color: var(--ink-muted, #898781); text-align: center; }
+.ofLegend { font-size: 11px; line-height: 1.4; color: var(--ink-2, #52514e); }
+
+/* empty / reconnecting: skeleton bars */
+.empty .bar { opacity: 0.55; animation: shimmer 1.5s linear infinite; background: linear-gradient(90deg, var(--surface-2, #f3f2ee) 0%, var(--grid, #e1e0d9) 50%, var(--surface-2, #f3f2ee) 100%); background-size: 200% 100%; }
+.empty .pressureBar { background: var(--surface-2, #f3f2ee); }
+.empty .pressureBuy { background: var(--grid, #e1e0d9); transform: scaleX(0.5) !important; }
+.empty .rowPrice, .empty .rowSize { color: var(--ink-muted, #898781); font-weight: 500; }
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton, .empty .bar, .status[data-state='live'] .dot::after, .flashUp, .flashDown { animation: none; }
+  .pressureBuy { transition: none; }
+}

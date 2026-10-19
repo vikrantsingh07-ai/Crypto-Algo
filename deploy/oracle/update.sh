@@ -6,7 +6,8 @@
 # It refuses to run when tracked files in the working tree were changed locally. Nothing is reset or deleted.
 #   optional env: APP_DIR (default /opt/cryptoalgo), HEALTH_TIMEOUT seconds (default 300), HEALTH_INTERVAL seconds
 #   (default 5), DRY_RUN=1 (read-only checks, prints the plan, changes nothing)
-# No secret is printed: log lines shown on a failure have every secret value from .env replaced by ***.
+# No secret is printed: log lines shown on a failure have every secret value from .env replaced by ***. (git pull runs
+# with --quiet so a remote URL that carries an access token is never echoed.)
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/cryptoalgo}"
@@ -53,7 +54,7 @@ fi
 
 # ---------------------------------------------------------------------------- pull
 log "fetching the latest code (fast-forward only)"
-g pull --ff-only || die "git pull --ff-only failed (no network, no upstream branch, or the local history diverged). Nothing was rebuilt; the old version is still running."
+g pull --ff-only --quiet || die "git pull --ff-only failed (no network, no upstream branch, or the local history diverged). Nothing was rebuilt; the old version is still running."
 after="$(g rev-parse HEAD)"
 if [[ "$before" == "$after" ]]; then
   log "already at the latest code ($(g rev-parse --short HEAD)); rebuilding anyway so the containers match it"

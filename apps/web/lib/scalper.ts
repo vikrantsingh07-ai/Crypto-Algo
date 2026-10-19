@@ -3,9 +3,11 @@ import type { BotState, ScalperStatus } from './types';
 
 /**
  * Delta "Scalper Offer": a position closed within the window (30 min for BTCUSD/ETHUSD futures) pays NO closing
- * fee, only the opening fee. The offer cannot be read through the Delta API, so Demo / backtests / pre-trade
- * economics ASSUME it while settings.execution.exitFeeWaiver.enabled, and Live P&L always uses the commission the
- * exchange reports. Terms below are as supplied by the operator, not verified against Delta.
+ * fee, only the opening fee. It is DORMANT and OFF by default (settings.execution.exitFeeWaiver.enabled = false):
+ * brokerage is paid on both legs and positions have no time limit. Nothing here is shown to the user unless the
+ * switch is turned on in the developer view. The offer cannot be read through the Delta API, so while it is on
+ * Demo / backtests / pre-trade economics assume it, and Live P&L always uses the commission the exchange reports.
+ * Terms below are as supplied by the operator, not verified against Delta.
  */
 export const DIWALI_NOTE =
   'The separate “Diwali Scalper Offer” (opening fee returned as a Fee Voucher; BTCUSD only; from 25 Sep 2026; capped at $100 per user per month) does not apply to this ETHUSD bot and is not modelled.';
@@ -18,22 +20,31 @@ export const OFFER_TERMS: string[] = [
 ];
 
 export interface ScalperView {
-  /** Settings switch (the assumption). */
+  /** Settings switch (the assumption). Off by default. */
   assumed: boolean;
   /** Whether the waiver is applied to the numbers on this side (Live drops it once the exchange shows fees charged). */
   effective: boolean;
   windowMin: number;
   marginSec: number;
-  /** Time-exit limit in minutes, clamped to window - margin while the waiver is applied. */
-  effectiveMaxHoldMin: number;
-  configuredMaxHoldMin: number;
+  /** Time-exit limit in minutes (clamped to window - margin while the waiver is applied); null = NO time limit. */
+  effectiveMaxHoldMin: number | null;
+  /** exits.maxHoldMinutes as configured; null = no limit. */
+  configuredMaxHoldMin: number | null;
+  /** True when a time limit exists (the default is none). */
+  hasTimeLimit: boolean;
   clamped: boolean;
 }
 
-/** Mirrors core's effectiveMaxHoldMs for servers that do not send it; the server's number wins when present. */
-export function effectiveMaxHoldMinutes(s: { exits: { maxHoldMinutes: number }; execution: { exitFeeWaiver?: Partial<WaiverSettings> } }, waiverOn: boolean = !!s.execution.exitFeeWaiver?.enabled): number {
-  const w = waiverSettings(s.execution.exitFeeWaiver);
+interface HoldSettings { exits: { maxHoldMinutes?: number | null; timeExitPolicy?: string }; execution: { exitFeeWaiver?: Partial<WaiverSettings> } }
+
+/**
+ * Mirrors core's effectiveMaxHoldMinutes for servers that do not send it; the server's number wins when present.
+ * null = no time limit: nothing is set, or the policy is "none" (a stored limit is then ignored by the bot).
+ */
+export function effectiveMaxHoldMinutes(s: HoldSettings, waiverOn: boolean = !!s.execution.exitFeeWaiver?.enabled): number | null {
   const hold = s.exits.maxHoldMinutes;
+  if (hold === null || hold === undefined || !Number.isFinite(hold) || s.exits.timeExitPolicy === 'none') return null;
+  const w = waiverSettings(s.execution.exitFeeWaiver);
   if (!waiverOn || !w.clampTimeExit) return hold;
   return Math.max(1, Math.min(hold, w.withinMinutes - w.safetyMarginSeconds / 60));
 }
@@ -44,15 +55,19 @@ export function waiverSettings(w?: Partial<WaiverSettings>): WaiverSettings {
   return { enabled: w?.enabled ?? false, withinMinutes: w?.withinMinutes ?? 30, safetyMarginSeconds: w?.safetyMarginSeconds ?? 90, clampTimeExit: w?.clampTimeExit ?? true };
 }
 
+/** A number or null; undefined (field missing on an older backend) and NaN/Infinity count as "no limit". */
+const finiteOrNull = (v: number | null | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
 export function scalperView(state: BotState, side: 'demo' | 'live'): ScalperView {
   const w = waiverSettings(state.settings.execution.exitFeeWaiver);
-  const configured = state.settings.exits.maxHoldMinutes;
+  const configured = finiteOrNull(state.settings.exits.maxHoldMinutes);
   const e = state.economics?.scalper;
   const l = state.live.scalper;
   const assumed = (side === 'live' ? l?.assumed : e?.assumed) ?? e?.assumed ?? w.enabled;
   const effective = side === 'live' ? (l?.effective ?? e?.liveEffective ?? assumed) : (e?.effective ?? assumed);
   const fromServer = side === 'live' ? l?.effectiveMaxHoldMinutes : e?.effectiveMaxHoldMinutes;
-  const effectiveMaxHoldMin = fromServer ?? effectiveMaxHoldMinutes(state.settings, effective);
+  // `undefined` = the server did not say (older backend): work it out; an explicit null from the server = no limit.
+  const effectiveMaxHoldMin = fromServer === undefined ? effectiveMaxHoldMinutes(state.settings, effective) : finiteOrNull(fromServer);
   return {
     assumed,
     effective,
@@ -60,7 +75,8 @@ export function scalperView(state: BotState, side: 'demo' | 'live'): ScalperView
     marginSec: (side === 'live' ? l?.safetyMarginSeconds : e?.safetyMarginSeconds) ?? w.safetyMarginSeconds,
     effectiveMaxHoldMin,
     configuredMaxHoldMin: configured,
-    clamped: effectiveMaxHoldMin < configured - 1e-9,
+    hasTimeLimit: effectiveMaxHoldMin !== null,
+    clamped: effectiveMaxHoldMin !== null && configured !== null && effectiveMaxHoldMin < configured - 1e-9,
   };
 }
 

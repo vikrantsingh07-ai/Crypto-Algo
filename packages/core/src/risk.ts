@@ -326,7 +326,7 @@ export function evaluateEntryRisk(input: RiskInput): RiskDecision {
     add({
       code: 'PER_TRADE_RISK',
       ok: worstCase.riskNet <= L.perTradeRiskUsd,
-      message: `Net loss at stop (incl. full fees, no waiver assumed) ${worstCase.riskNet.toFixed(2)} vs limit ${L.perTradeRiskUsd}`,
+      message: `Net loss at stop (stop distance, slippage and brokerage on both legs) ${worstCase.riskNet.toFixed(2)} vs limit ${L.perTradeRiskUsd}`,
       value: Number(worstCase.riskNet.toFixed(4)),
       limit: L.perTradeRiskUsd,
     });

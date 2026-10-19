@@ -57,15 +57,19 @@ export function ConditionList({ state }: { state: BotState }) {
   );
 }
 
-/** Exit-fee cell: FREE when the Scalper Offer waived it, otherwise the charged amount (Live: as reported by the exchange). */
-function ExitFeeCell({ t, windowMin, live }: { t: TradeRow; windowMin: number; live: boolean }) {
+/**
+ * Exit-fee cell: the charged amount (Live: as reported by the exchange). `windowMin` is the Scalper Offer window and is null
+ * while the offer is not in use (the default), in which case nothing about the offer is mentioned; a zero fee on an older
+ * trade that did use it still reads FREE.
+ */
+function ExitFeeCell({ t, windowMin, live }: { t: TradeRow; windowMin: number | null; live: boolean }) {
   if (t.exitFee === null || t.exitFee === undefined) return <span className="muted">—</span>;
   const saved = t.exitFeeSaved ?? t.meta?.exitFeeSaved ?? null;
-  if (t.exitFee === 0) {
+  if (t.exitFee === 0 && (windowMin !== null || saved)) {
     return <><Tag kind="good">FREE</Tag>{saved ? <div className="sub">saved {usd(saved, 3)}</div> : live ? <div className="sub">exchange: $0.00</div> : null}</>;
   }
   // charged although it closed inside the window: surface it (liquidations and ineligible trades legitimately pay)
-  const inside = t.holdMs !== null && t.holdMs <= windowMin * 60_000;
+  const inside = windowMin !== null && t.holdMs !== null && t.holdMs <= windowMin * 60_000;
   return (
     <span title={inside ? 'Closed inside the offer window but a closing fee was charged (liquidation, not eligible, or the offer is not applied).' : undefined}>
       {usd(t.exitFee, 3)}
@@ -75,7 +79,7 @@ function ExitFeeCell({ t, windowMin, live }: { t: TradeRow; windowMin: number; l
 }
 
 /** Phone layout: one card per trade so the fee outcome (exit FREE / charged) is visible without sideways scrolling. */
-function TradeCards({ rows, live, windowMin }: { rows: TradeRow[]; live: boolean; windowMin: number }) {
+function TradeCards({ rows, live, windowMin }: { rows: TradeRow[]; live: boolean; windowMin: number | null }) {
   return (
     <ul className="trade-cards">
       {rows.map((t) => (
@@ -105,7 +109,7 @@ function TradeCards({ rows, live, windowMin }: { rows: TradeRow[]; live: boolean
   );
 }
 
-export function TradesTable({ rows, mode, windowMin = 30 }: { rows: TradeRow[] | null; mode: 'demo' | 'live'; windowMin?: number }) {
+export function TradesTable({ rows, mode, windowMin = null }: { rows: TradeRow[] | null; mode: 'demo' | 'live'; windowMin?: number | null }) {
   if (!rows) return <div className="empty">Loading…</div>;
   if (!rows.length) return <div className="empty">{mode === 'demo' ? 'No simulated trades yet.' : 'No live trades recorded by this bot yet.'}</div>;
   const live = mode === 'live';
@@ -161,8 +165,8 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
   const rates = state.economics?.rates ?? { taker: state.spec.takerFeeRate, gst: state.settings.execution.gstRate };
   const v = scalperView(state, 'demo');
   const heldMs = pos ? Math.max(0, now - pos.entryTs) : 0;
-  // the time exit is clamped to window - margin while the offer is assumed (28.5 min, not the raw 30)
-  const maxHoldMs = v.effectiveMaxHoldMin * 60_000;
+  // null = no time limit (the default). With the offer on, an existing limit is clamped to window - margin (28.5 min, not the raw 30)
+  const maxHoldMs = v.effectiveMaxHoldMin === null ? null : v.effectiveMaxHoldMin * 60_000;
   const waivedNow = !!pos && v.effective && feeWindow(pos.entryTs, v.windowMin, now).remainingMs > 0;
   const takerExitFee = pos && mark !== null ? mark * pos.qtyEth * (state.settings.execution.takerFeeRate ?? rates.taker) * (1 + rates.gst) : null;
   const estExitFee = waivedNow ? 0 : takerExitFee;
@@ -222,7 +226,7 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
                   <tr><td className="sec">Target · Stop</td><td className="num">{num(pos.targetPrice)} · {num(pos.stopPrice)}{pos.breakevenArmed ? ' (break-even)' : ''}</td></tr>
                   <tr><td className="sec">Gross P&L</td><td className="num"><Pnl v={unrealGross} /></td></tr>
                   <tr><td className="sec">Entry fee (simulated, paid)</td><td className="num">{usd(pos.entryFee.total, 3)}</td></tr>
-                  <tr><td className="sec">Exit fee if closed now</td><td className="num">{waivedNow ? <b className="good">FREE (Scalper Offer)</b> : <>{usd(estExitFee, 3)} <span className="muted">(est.{v.effective ? ', window ended' : ', offer off'})</span></>}</td></tr>
+                  <tr><td className="sec">Exit fee if closed now</td><td className="num">{waivedNow ? <b className="good">FREE (Scalper Offer)</b> : <>{usd(estExitFee, 3)} <span className="muted">(est.{v.effective ? ', window ended' : ''})</span></>}</td></tr>
                   <tr><td className="sec">Net if closed now</td><td className="num"><Pnl v={unrealGross !== null && estExitFee !== null ? unrealGross - pos.entryFee.total - estExitFee : null} /></td></tr>
                   <tr><td className="sec">Liquidation (est.)</td><td className="num">{num(pos.liquidationPrice)}</td></tr>
                   <tr><td className="sec">Max favourable move</td><td className="num">${num(pos.mfe)} of ${num(pos.targetMoveUsd)} target</td></tr>
@@ -230,9 +234,15 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
               </table>
               {v.effective && <div style={{ marginTop: 10 }}><ExitFeeClock entryTs={pos.entryTs} windowMin={v.windowMin} now={now} /></div>}
               <div style={{ marginTop: 10 }}>
-                <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Holding time{v.clamped ? ' · time exit' : ''}</span><span className="tabnum">{duration(heldMs)} / {duration(maxHoldMs)}</span></div>
-                <Meter value={heldMs} max={maxHoldMs} label="Holding time used" />
-                {v.clamped && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>The time exit fires at {duration(maxHoldMs)} (configured {state.settings.exits.maxHoldMinutes} min, shortened by the {v.marginSec} s safety margin) so even that close stays inside the {v.windowMin}-min fee-free window.</div>}
+                {maxHoldMs === null ? (
+                  <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Open for · no time limit</span><span className="tabnum">{duration(heldMs)}</span></div>
+                ) : (
+                  <>
+                    <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Holding time{v.clamped ? ' · time exit' : ''}</span><span className="tabnum">{duration(heldMs)} / {duration(maxHoldMs)}</span></div>
+                    <Meter value={heldMs} max={maxHoldMs} label="Holding time used" />
+                    {v.clamped && <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>The time exit fires at {duration(maxHoldMs)} (configured {state.settings.exits.maxHoldMinutes} min, shortened by the {v.marginSec} s safety margin) so even that close stays inside the {v.windowMin}-min fee-free window.</div>}
+                  </>
+                )}
               </div>
               {actions.isAdmin && <button className="btn sm" style={{ marginTop: 10 }} onClick={() => actions.run('Close', () => api('POST', 'demo/close'), 'Simulated position closed')}>Close simulated position</button>}
             </>
@@ -242,7 +252,7 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
                 <b>No open simulated position.</b> The bot opens a trade only when every strategy condition passes <i>and</i> the risk manager approves — it never trades just to use the daily quota.
               </p>
               <p className="sec" style={{ fontSize: 12 }}>
-                {v.effective ? <>A trade closed within {v.windowMin} min pays <b>no closing fee</b>, only the entry fee (Delta Scalper Offer — assumed).</> : <>Scalper Offer switched off: both the entry and the closing fee are charged.</>}
+                {v.effective ? <>A trade closed within {v.windowMin} min pays <b>no closing fee</b>, only the entry fee (Delta Scalper Offer — assumed).</> : <>Brokerage is charged on both the entry and the closing leg. A trade has no time limit: it ends at its target or its stop.</>}
               </p>
               <div className="sec">Latest signal: {sig ? <b>{sig.side.toUpperCase()} @ {num(sig.refPrice)} (target ${num(sig.targetMoveUsd)}, stop ${num(sig.stopMoveUsd)})</b> : <b>none</b>}</div>
               {d.lastDecision && (
@@ -306,7 +316,7 @@ export default function DemoPanel({ state, actions }: { state: BotState; actions
               <b>Closing fees saved by the Scalper Offer:</b> <span className="tabnum good">{usd(savedSum, 3)}</span> over these {closed.length} closed trades <span className="muted">(simulated — assumes the offer)</span>
             </p>
           )}
-          <TradesTable rows={trades} mode="demo" windowMin={v.windowMin} />
+          <TradesTable rows={trades} mode="demo" windowMin={v.assumed ? v.windowMin : null} />
         </Card>
       </div>
     </div>

@@ -58,7 +58,7 @@ function TradeAnalytics({ mode, state }: { mode: 'demo' | 'live'; state: BotStat
             <div className="sec" style={{ fontSize: 12, marginTop: 4 }}>
               {v.assumed
                 ? <><b>Assumption:</b> closing fees are waived on trades closed within {v.windowMin} min (Delta Scalper Offer). Delta does not expose the offer through its API, so these numbers depend on that assumption holding for your account.</>
-                : <>Scalper Offer assumption is <b>off</b>: the full closing fee is counted.</>}
+                : <>Brokerage is counted on both legs, entry and exit.</>}
             </div>
           )}
         </div>
@@ -104,12 +104,12 @@ function MetricsBlock({ m, rate, recent, drawdown, state, emptyHint, ddOverride,
         <Stat label="Net P&L" value={<Pnl v={m.netPnl} />} sub={inr(m.netPnlInr || m.netPnl * rate)} tone={m.netPnl > 0 ? 'good' : m.netPnl < 0 ? 'bad' : undefined} />
         <Stat label="Profit factor" value={m.profitFactor === null ? '∞' : num(m.profitFactor)} sub={`avg win ${usd(m.avgWin)} · avg loss ${usd(m.avgLoss)}`} />
         <Stat label="Max drawdown" value={pctRaw(m.maxDrawdownPct, 2)} sub={usd(m.maxDrawdownUsd)} />
-        <Stat label="Avg hold" value={`${num(m.avgHoldMinutes, 1)} min`} sub={`time-exit limit ${minutes(v.effectiveMaxHoldMin)}${v.clamped ? ' (fee-free window)' : ''}`} />
+        <Stat label="Avg hold" value={`${num(m.avgHoldMinutes, 1)} min`} sub={v.effectiveMaxHoldMin === null ? 'no time limit' : `time-exit limit ${minutes(v.effectiveMaxHoldMin)}${v.clamped ? ' (fee-free window)' : ''}`} />
         <Stat label="Reached target" value={pctRaw(m.targetReachedPct, 0)} sub="price hit the target distance" />
         <Stat label="Take-profit exits" value={pctRaw(m.takeProfitPct, 0)} sub="filled by the TP order" />
         <Stat label="Stop-loss exits" value={pctRaw(m.stopLossPct, 0)} sub={`break-even stops ${pctRaw(m.breakevenStopPct, 0)}`} />
-        <Stat label="Time exits" value={pctRaw(m.timeExitPct, 0)} sub="closed at the time limit" />
-        {m.feesSavedUsd !== undefined && (
+        <Stat label="Time exits" value={pctRaw(m.timeExitPct, 0)} sub={v.hasTimeLimit ? 'closed at the time limit' : 'no time limit is set'} />
+        {m.feesSavedUsd !== undefined && (v.assumed || m.feesSavedUsd > 0) && (
           <Stat
             wide
             label="Closing fees saved (Scalper Offer)"
@@ -213,7 +213,7 @@ function Backtests({ state }: { state: BotState }) {
           <div className="sec" style={{ fontSize: 12, marginTop: 4 }}>
             {scalperView(state, 'demo').assumed
               ? <><b>Assumption:</b> closing fees are waived on trades closed within {scalperView(state, 'demo').windowMin} min (Delta Scalper Offer, as supplied by the operator and not verifiable through the API). Results depend on your account having joined it.</>
-              : <>Scalper Offer assumption is <b>off</b>: the full closing fee is counted.</>}
+              : <>Brokerage is counted on both legs, entry and exit.</>}
           </div>
         </div>
       </div>

@@ -2,7 +2,7 @@
 
 Yeh guide un operator ke liye hai jo sirf phone ka browser use kar raha hai: GitHub app, Vercel dashboard aur backend host ka dashboard. Koi terminal, CLI ya laptop nahi chahiye.
 
-Likha gaya: 18 Oct 2026. Har step ke saath yeh bhi likha hai ki kya check ho chuka hai aur kya NAHI (last section "Kya verify NAHI hua" zaroor padho).
+Likha gaya: 18 Oct 2026; 19 Oct 2026 ko naye dashboard aur naye trading rules (position par time limit nahi, target $10) ke hisaab se badla gaya. Har step ke saath yeh bhi likha hai ki kya check ho chuka hai aur kya NAHI (last section "Kya verify NAHI hua" zaroor padho).
 
 > **Oracle Cloud ka VM hai to** Step A (Neon) aur Step B (Render) ki jagah [`docs/ORACLE_CLOUD_HINGLISH.md`](ORACLE_CLOUD_HINGLISH.md) follow karo (backend aur database usi VM par), phir Step C (Vercel) yahin se.
 
@@ -106,6 +106,12 @@ Supabase ya Render Postgres bhi chalenge (koi bhi `postgresql://` string), par h
 
 Render service me Settings, "Build & Deploy", "Auto-Deploy" ko Off kar sakte ho. Warna GitHub par har naye commit par backend redeploy hoga (bot restart hota hai; woh safely wapas sync ho jaata hai, par live trading ke dauran isse bachna behtar hai).
 
+### Naya code aane par kya karein
+
+- **Dashboard (Vercel):** kuch nahi. Vercel `main` se apne aap naya build bana leta hai.
+- **Backend Render par:** agar Auto-Deploy ON hai to apne aap; warna Render me service kholo, "Manual Deploy" dabao. Pehle start par saved settings ek baar apne aap naye version (version 2: time limit nahi, target $10, stop $5-$8) par aa jaati hain, baaki values wahi rehti hain.
+- **Backend Oracle VM par:** ek command, `docs/ORACLE_CLOUD_HINGLISH.md` ka "Naya version lagana" section dekho.
+
 ### Railway (agar Render nahi chalta)
 
 Repo me `railway.json` hai (Dockerfile builder, health check `/api/health`, 1 replica). Railway par: New Project, Deploy from GitHub repo, repo chuno. Variables me Render wali hi list daalo, Settings, Networking me "Generate Domain". Yeh `railway.json` ki schema yaadasht se hai, chalayi nahi gayi. Railway ka kharcha usage-based hai (Hobby plan lagbhag US$5 se, current pricing check karo). Static outbound IP (Live ke liye) Railway par alag feature hai: check karo.
@@ -140,41 +146,36 @@ Quick jaanch: `https://VERCEL-URL/api/health` kholo. Wahi JSON aana chahiye jo R
 ## 5. Step D: Site kholo aur login karo
 
 1. Vercel URL kholo. Login screen aayegi. Username `admin`, password woh jo Render me `ADMIN_PASSWORD` me daala.
-2. Sahi Demo screen aisi dikhti hai:
-   - Upar ek status line: **"DEMO MODE — LIVE TRADING DISABLED"**.
-   - "Bot running · worker active".
-   - Status bar me **Market data: WebSocket live** aur uske saamne **hara dot**. Agar "REST fallback" (peela) hai to bhi chal raha hai; "DOWN" (laal) hai to Troubleshooting dekho.
-   - "Exchange account API: not configured" (demo me yehi normal hai, key chahiye hi nahi).
-   - "Scalper Offer: assumed · no closing fee ≤ 30 min" (peela dot normal hai; neeche section 6 dekho).
-   - ETHUSD ka price upar dikhta hai. Demo account virtual balance se shuru hota hai (default US$100).
-3. **Trades turant nahi aayenge.** Strategy tabhi trade leti hai jab setup mile aur fees ke baad bhi faayda bane. Ghante lag sakte hain, shaant market me poora din bhi zero trades aa sakte hain. Yeh normal hai, kharabi nahi. Demo tab me "last decision" / risk checks se dikhta hai ki bot ruka kyun hai.
+2. Sahi Demo screen aisi dikhti hai (yeh **simple dashboard** hai, default view):
+   - Upar naam, ek chip **"DEMO - simulated, no real money"**, aur algo ki halat saaf shabdon me ("Algo is watching the market" waghera). Menu me Developer view, light/dark, Emergency stop aur Sign out hain.
+   - Bayen upar: ETH ka **bada price** aur uske neeche live chart. Price ke paas ek chhota pill hota hai: **Live** (browser seedha Delta ke public feed se price le raha hai), **Connecting**, **Delayed** (browser ko Delta ka feed nahi mila, backend ka price dikh raha hai, thoda dheema) ya **Reconnecting**.
+   - Uske bagal me **Order flow**: khareedaar **baayein (hare)**, bechne wale **daayein (laal)**, 10-10 levels, beech me price, aur har bar se price tak ek patli line.
+   - Neeche: **My simulated account** (balance, equity, aaj ka result USD aur INR me, roz ka goal bar, "Trades today n of 10") aur uske bagal me **algo kya kar raha hai** (chal rahi trade: entry, take profit, stop loss, abhi ka profit/loss; ya "Waiting for a good setup"; aur haal ki band trades). Phone par yeh cards ek ke neeche ek aate hain.
+   - Jo upar nahi dikhta (settings, risk-check codes, fee tables, API ki details, activation wizard) woh sab **Menu → Developer view** me hai. Wahan "Simple view" button se wapas aa sakte ho.
+   - Chip par DEMO likha hona chahiye. Developer view me upar **"DEMO MODE — LIVE TRADING DISABLED"** dikhta hai.
+   - Demo account virtual balance se shuru hota hai (default US$100).
+3. **Trades turant nahi aayenge.** Strategy tabhi trade leti hai jab setup mile aur fees ke baad bhi faayda bane. Ghante lag sakte hain, shaant market me poora din bhi zero trades aa sakte hain. Yeh normal hai, kharabi nahi. Algo ke card par "Waiting for a good setup" ke neeche ek line batati hai ki ruka kyun hai.
+4. **Ek trade ghanton khula reh sakta hai.** Position par time limit nahi hai: woh sirf take profit ya stop loss par band hoti hai. Isliye ek trade 2-3 ghante ya usse zyada bhi chal sakta hai, aur tab tak naya trade nahi aata.
 
 Pehle 1 se 2 hafte sirf Demo chalne do (docs/GO_LIVE_CHECKLIST.md ka hissa A).
 
-## 6. Delta ka Scalper Offer (fee kam karne wala offer)
+## 6. Fees, target aur position ka time limit (naye rules)
 
-Yeh terms operator ne diye hain, aur inhe Delta ke asli exchange se verify NAHI kiya gaya (sandbox se Delta tak pahunch nahi hai).
+Yeh bot ke default hain. Inme koi bhi number kisi munafe ka vaada nahi hai.
 
-- **Close within 30 minutes** (BTCUSD aur ETHUSD ke liye; baaki futures ke liye 15 minutes): eligible trade par **closing fee nahi lagti**. **Opening fee phir bhi lagti hai.** Delta ka example: opening maker fee 0.02% ($12 on $60,000) lagti hai, closing taker fee 0.05% ($30.05) maaf.
-- Aapke Delta account ne offer **join** kiya hona chahiye. Join karne se pehle ke trades eligible nahi. Ek baar activate karne ke baad deactivate nahi hota. Join kahan karna hai woh Delta ki app/website par dekho (hume Delta ka UI verify nahi).
-- Liquidation eligible nahi. Partially closed position eligible hai. Internal / corporate / RMM / MM / KOL fixed-fee users ke liye nahi hai.
-- Delta offer ko bina bataye badal ya band kar sakta hai.
-- **Diwali Scalper Offer** (opening fee Fee Voucher ke roop me wapas; sirf BTCUSD; 25 Sep 2026 se; $100 per user per month cap) alag offer hai. Yeh bot ETHUSD par chalta hai, isliye woh **lagu nahi hota aur bot me model bhi nahi hai**.
-
-Bot kya karta hai:
-
-- Offer API se padha nahi ja sakta, isliye Demo, backtest aur trade se pehle ke fee hisaab me offer **maan liya** jaata hai. Setting: Strategy & Risk tab, card "Delta Scalper Offer (closing-fee waiver)", toggle "Assume the Scalper Offer" (default ON; OFF karoge to har jagah poori closing fee ginti hai).
-- Isliye time exit **28.5 minute** par lagta hai (30 minute minus 90 second ka safety margin), taaki trade window ke andar band ho.
-- Demo me trade 30 minute ke andar band ho to sirf entry fee lagti hai (simulated).
-- **Live** me P&L hamesha wahi commission lagta hai jo exchange ne asli me charge ki (woh authoritative hai).
-- Live me jo trades 30 minute ke andar band hote hain, bot unki closing fee check karta hai (pehle eligible close se shuru). Agar Delta ne closing fee nahi li to status "confirmed" ho jaata hai. Agar Delta ne closing fee li, to status "NOT APPLIED" ho jaata hai: bot phir poori fee ke hisaab se hisaab lagata hai, time exit ko clamp nahi karta, aur is wajah se kam trade leta hai (zyada nahi).
-- Bina offer ke ek taker round trip lagbhag $0.71 ka padta hai (default size 0.20 ETH, ETH $3,000 par), offer ke saath lagbhag aadha (sirf entry fee $0.354). Isliye offer join kiye bina Live mat jao.
+- **Target fixed $10 per ETH** (long ho ya short). 0.20 ETH par yeh $2.00 gross hai. **Stop-loss $5 se $8** ke beech (ATR ke hisaab se). Position par **koi time limit nahi**: trade tabhi band hota hai jab take profit ya stop loss lage (ya aap haath se band karo, ya emergency stop). Stop-loss hamesha lagi rehti hai. Time limit hata hai, stop nahi.
+- **Brokerage dono taraf lagti hai** (entry par bhi, exit par bhi), 18% GST ke saath. 0.20 ETH par entry + exit milakar lagbhag **US$0.80** (ETH ~$3,390 par, dono taker). ETH ka price badhne par fee badhti hai. Jeetne wali trade lagbhag $1.20 se $1.44 kamati hai (take profit resting order se lage to fee kam), haarne wali trade $1.85 se $2.45 tak ghatati hai.
+- **Roz ka goal 500 INR sirf goal hai, vaada nahi.** Isse kamane ke liye lagbhag 80% trades jeetni padengi. Yeh bot ya docs me kahin saabit nahi hua. Bot goal poora karne ke liye trade nahi karta.
+- **10 trades roz tak (rolling 24 ghante)** yeh upar ki seema hai (ceiling), koi quota nahi. Setup na mile to 0 trade bhi theek hai.
+- **Time limit nahi hone ke matlab:** trade raat bhar bhi khula reh sakta hai; har funding time par funding paisa lagta ya milta hai (kam raqam, par lagti hai); ek trade khula ho to doosra nahi aata; tezi se bhaage market me stop-loss apni price se thoda bura fill ho sakta hai. Demo me trade tabhi aage badhta hai jab backend chal raha ho.
+- Sab hisaab (fee, kitni win rate chahiye, risk gates): `docs/STRATEGY_AND_FEES.md`.
+- Delta ka "Scalper Offer" (30 minute me band karne par closing fee maaf) **bot maanta hi nahi**. Woh sirf ek optional, band rakhi hui setting hai (Developer view me), aur Diwali Scalper Offer sirf BTCUSD ke liye hai, ETH bot par lagu nahi.
 
 ## 7. Live: abhi ON MAT KARO
 
 Live trading default me band hai aur band hi rehni chahiye. Pehle yeh sab:
 
-1. Demo kam se kam 1 se 2 hafte, trades aur drawdown samajh ke.
+1. Demo kam se kam 1 se 2 hafte, trades aur drawdown samajh ke, aur woh trades bhi dekho jo ghanton khule rahe (funding kitni lagi, kitni der slot ruka raha).
 2. **Testnet pehle.** Delta India ka demo (testnet) account aur uski alag API key. Render me `DELTA_ENV=testnet` karke rehearsal karo. Testnet key production par nahi chalti aur ulta bhi.
 3. **Static IP.** Delta trading wali API key par IP whitelist maangta hai. Render ke outbound IPs region ke sab Render services ke saath share hote hain (Render dashboard, service, Connect, Outbound). Live ke liye dedicated static IP wala host (Fly egress IP ya VPS) behtar hai. Delta ki whitelisting aur yeh ki Render ke IP badalte hain ya nahi: yeh yahan verify nahi hua, Render ke docs me check karo.
 4. **API key permissions:** Trading **YES**, Withdraw / transfer ka koi bhi option **NO**. Key sirf backend me jaati hai (dashboard ke Settings me "Exchange connection" se, jo `CREDENTIAL_ENCRYPTION_KEY` se encrypt karke database me rakhti hai). Vercel me kabhi nahi.
@@ -193,6 +194,8 @@ Live trading default me band hai aur band hi rehni chahiye. Pehle yeh sab:
 | Vercel URL par "Authentication Required" / Vercel login maang raha hai | Aap deployment ka lamba URL khol rahe ho (Vercel ki Deployment Protection) | Project ka main URL (`project-naam.vercel.app`) kholo; phir bhi aaye to Vercel, Settings, Deployment Protection dekho |
 | Dashboard khulta hai par "Market data: DOWN" | Render se Delta tak pahunch nahi ya Delta ka outage | Kuch minute ruko (apne aap reconnect hota hai). Render Logs me `market data error` lines dekho. Is dauran bot naye trade nahi leta (fail-closed) |
 | Bot idle, trades nahi | Normal ho sakta hai: market shaant, ya fees ke baad faayda nahi. Ya bot Stopped / Kill switch ON | Demo tab: "Bot running" aur kill switch dekho, "last decision" / risk checks padho. Hafte bhar me bhi trades na ayen tab Strategy & Risk dekho |
+| Price ke paas "Delayed" likha hai | Browser ko Delta ka public price feed nahi mila (network ya extension rok raha hai, ya Delta us site ko mana kar raha hai). Backend ka thoda dheema price dikh raha hai | Bot par koi asar nahi. Page reload karo; woh apne aap dobara try bhi karta rehta hai. Hamesha "Delayed" rahe to developer ko batao (yeh asli Delta se verify nahi hua) |
+| "Reconnecting..." aur "Try now" button | Dashboard ko backend nahi mil raha (backend restart ho raha hai, ya `BACKEND_URL` / `PROXY_SHARED_SECRET` galat) | Backend URL + `/api/health` browser me kholo; Vercel me dono values check karo; dashboard khud bhi dobara try karta hai |
 | Password bhool gaye | - | Render, Environment, `ADMIN_PASSWORD` badlo, Save (redeploy hoga). Agar `ADMIN_PASSWORD_HASH` bhi set hai to woh jeetta hai: use hata do |
 | Neon DB band / "database" error | Free compute limit khatam ya project pause | Neon dashboard me usage dekho, paid plan par jao ya naya database; `DATABASE_URL` update |
 
@@ -216,7 +219,8 @@ Jo verify NAHI hua:
 - Sandbox me Docker daemon nahi tha, par GitHub CI ke `docker` job ne image sach me build ki (amd64) aur container ka health check pass hua (run on `main`). ARM par aur asli host par nahi chali. `docker-compose.yml` sirf `docker compose config` se parse hua.
 - Asli Postgres (Neon) se connection, pooled vs direct, SSL: kuch test nahi hua. Sirf embedded database aur "host nahi mila" wala failure path chala.
 - Vercel par asli build nahi hua; Root Directory, "Include source files outside of the Root Directory" aur Node version ki jaankari Vercel docs se aur local simulation se hai. Browser se Vercel se backend tak poora chain ek saath nahi chala (sirf backend curl se proxy header ke saath, aur dashboard alag).
-- Delta ke hosts sandbox se unreachable hain. Scalper Offer ke terms, IP whitelisting, API key permissions, Delta ke UI ke shabd: sab operator-diye ya maane hue hain, Delta se verify nahi.
+- Delta ke hosts sandbox se unreachable hain. IP whitelisting, API key permissions, Delta ke UI ke shabd: sab operator-diye ya maane hue hain, Delta se verify nahi. Browser ka seedha Delta price feed sirf nakli Delta feed ke saath chala (asli Delta ke saath nahi): asli browser me price pill "Live" dikhna chahiye, "Delayed" nahi.
+- Asli Delta data par koi backtest nahi chala. 500 INR/din ka goal sirf goal hai; kitni trades jeetengi yeh abhi kisi ne naapa nahi. VM par backtest (Developer view → Analytics → Backtests) chala kar dekho, aur Demo kuch hafte.
 - Kharche ke numbers, Neon free limits, Render/Vercel/Neon ke screen ke shabd yaadasht se hain aur badal chuke ho sakte hain.
 - Live trading kisi bhi tarah test nahi hui. Pehle testnet.
 

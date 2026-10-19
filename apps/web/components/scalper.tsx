@@ -87,12 +87,13 @@ export function FeeRealityCard({ state, wide }: { state: BotState; wide?: boolea
   const midNo = noRows?.find((r) => mid && sameMove(r, mid));
 
   let sentence: ReactNode;
-  if (!v.assumed) {
+  if (!v.effective) {
     sentence = (
       <>
-        The Scalper Offer is <b>switched OFF</b> in settings, so the <b>full closing fee</b> is counted everywhere
+        Brokerage is paid on <b>both</b> the entry and the exit
         {mid && <>: a ${num(mid.moveUsd, 1)} target nets <b>{signedUsd(mid.netReward, 3)}</b></>}
-        {beWithout !== undefined && <> and price must move <b>${num(beWithout)}</b> just to cover fees</>}. If your Delta account has joined the offer, turn it on under Strategy &amp; Risk.
+        {beWithout !== undefined && <> and price must move <b>${num(beWithout)}</b> just to cover fees</>}.
+        {v.assumed && <> The Scalper Offer is switched on, but it only counts when a time limit keeps every exit inside its window, so full fees are used here.</>}
       </>
     );
   } else if (compare && mid && midNo && beWith !== undefined && beWithout !== undefined) {
@@ -116,7 +117,7 @@ export function FeeRealityCard({ state, wide }: { state: BotState; wide?: boolea
       className={wide ? 'fee-wide' : ''}
       title="Fee reality check"
       hint={`At ETH $${num(econ.referencePrice)} · ${econ.contracts} contracts · stop ≈ $${num(econ.stopUsd)} — recomputed live`}
-      right={v.assumed ? <Tag kind="sim">Scalper Offer assumed</Tag> : <Tag kind="warn">Offer OFF · full fees</Tag>}
+      right={v.assumed ? <Tag kind="sim">Scalper Offer assumed</Tag> : <Tag>Brokerage on both legs</Tag>}
     >
       <div className="fee-layout">
         <div>
@@ -187,10 +188,10 @@ export function FeeRealityCard({ state, wide }: { state: BotState; wide?: boolea
         {v.assumed ? (
           <><b>Assumption:</b> Demo, backtests and these pre-trade numbers assume the offer because it cannot be read through the Delta API. Live P&amp;L always uses the commission the exchange reports.</>
         ) : (
-          <><b>Not assumed:</b> Demo, backtests and these numbers count the full closing fee. Live P&amp;L always uses the commission the exchange reports.</>
+          <>Demo, backtests and these numbers count the brokerage on both legs. Live P&amp;L always uses the commission the exchange reports.</>
         )}
       </p>
-      <OfferTerms />
+      {v.assumed && <OfferTerms />}
     </Card>
   );
 }

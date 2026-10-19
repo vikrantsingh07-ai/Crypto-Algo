@@ -16,7 +16,7 @@ interface Check {
 }
 /** Only the fields the Scalper Offer row needs are typed; the rest of the summary is read loosely. */
 type PreflightSummary = Record<string, any> & {
-  scalperOffer?: { assumed: boolean; windowMinutes: number; safetyMarginSeconds: number; effectiveMaxHoldMinutes: number };
+  scalperOffer?: { assumed: boolean; windowMinutes: number; safetyMarginSeconds: number; effectiveMaxHoldMinutes: number | null };
 };
 interface Preflight {
   ok: boolean;
@@ -26,6 +26,13 @@ interface Preflight {
   expiresAt: number;
   requiredPhrase: string;
   acknowledgements: string[];
+}
+
+/** Time limit as text; the default is none. The server may send the configured minutes or null. */
+function holdText(s: PreflightSummary): string {
+  const eff = s.scalperOffer?.assumed ? s.scalperOffer.effectiveMaxHoldMinutes : s.maxHoldMinutes;
+  if (eff === null || eff === undefined || !Number.isFinite(Number(eff))) return 'no time limit';
+  return minutes(Number(eff));
 }
 
 /**
@@ -145,28 +152,23 @@ export default function ActivationWizard({ state, onClose, onDone }: { state: Bo
               <tr><td className="sec">Contract</td><td className="num">{s.symbol} (product {s.productId}) · {s.contractValueEth} ETH per contract</td></tr>
               <tr><td className="sec">Position</td><td className="num">{s.quantityEth} ETH = {s.contracts} contracts · {s.leverage}x (max {s.maxLeverage}x)</td></tr>
               <tr><td className="sec">Est. margin per trade</td><td className="num">{usd(s.estimatedMarginUsd)} of {usd(s.availableBalanceUsd)} available</td></tr>
-              <tr><td className="sec">Target · stop (ETH price move)</td><td className="num">${s.targetRangeUsd[0]}–${s.targetRangeUsd[1]} · up to ${s.stopLossMaxUsd}</td></tr>
-              <tr><td className="sec">Max hold · trades/24h</td><td className="num">{s.scalperOffer?.assumed && s.scalperOffer.effectiveMaxHoldMinutes < s.maxHoldMinutes ? <>{minutes(s.scalperOffer.effectiveMaxHoldMinutes)} <span className="muted">(configured {s.maxHoldMinutes})</span></> : <>{s.maxHoldMinutes} min</>} · {s.maxTradesPer24h}</td></tr>
+              <tr><td className="sec">Target · stop (ETH price move)</td><td className="num">{s.targetRangeUsd[0] === s.targetRangeUsd[1] ? `$${s.targetRangeUsd[0]}` : `$${s.targetRangeUsd[0]}–${s.targetRangeUsd[1]}`} · up to ${s.stopLossMaxUsd}</td></tr>
+              <tr><td className="sec">Time limit · trades/24h</td><td className="num">{holdText(s)} · up to {s.maxTradesPer24h}</td></tr>
               <tr><td className="sec">Per-trade risk · daily loss · max drawdown</td><td className="num">{usd(s.perTradeRiskUsd)} · {usd(s.dailyLossLimitUsd)} · {s.maxDrawdownPct}%</td></tr>
               <tr><td className="sec">Fee break-even move</td><td className="num">${num(s.breakevenMoveUsd)} per ETH — fees take ≈ {pct(s.feeFractionOfTarget, 0)} of a mid-size target</td></tr>
-              <tr>
-                <td className="sec">Closing-fee waiver (Scalper Offer)</td>
-                <td className="num">
-                  {s.scalperOffer ? (
-                    s.scalperOffer.assumed ? (
-                      <>
-                        <b>ASSUMED</b> — a close within {s.scalperOffer.windowMinutes} min pays no closing fee, only the entry fee; time exit at {minutes(s.scalperOffer.effectiveMaxHoldMinutes)} ({s.scalperOffer.safetyMarginSeconds} s margin).
-                        <div className="muted" style={{ fontSize: 12 }}>Not verifiable through the Delta API: your account must have joined the offer. Live P&amp;L uses the fees Delta actually charges, and the first eligible closes are checked.</div>
-                      </>
-                    ) : (
-                      <><b>OFF</b> — the full closing fee is counted in every estimate.</>
-                    )
-                  ) : (
-                    <span className="muted">not reported by this server version</span>
-                  )}
-                  <div className="muted" style={{ fontSize: 12 }}>{DIWALI_NOTE}</div>
-                </td>
-              </tr>
+              {s.scalperOffer?.assumed ? (
+                <tr>
+                  <td className="sec">Closing-fee waiver (Scalper Offer)</td>
+                  <td className="num">
+                    <b>ASSUMED</b> — a close within {s.scalperOffer.windowMinutes} min pays no closing fee, only the entry fee
+                    {s.scalperOffer.effectiveMaxHoldMinutes !== null && <>; time exit at {minutes(s.scalperOffer.effectiveMaxHoldMinutes)} ({s.scalperOffer.safetyMarginSeconds} s margin)</>}.
+                    <div className="muted" style={{ fontSize: 12 }}>Not verifiable through the Delta API: your account must have joined the offer. Live P&amp;L uses the fees Delta actually charges, and the first eligible closes are checked.</div>
+                    <div className="muted" style={{ fontSize: 12 }}>{DIWALI_NOTE}</div>
+                  </td>
+                </tr>
+              ) : (
+                <tr><td className="sec">Brokerage</td><td className="num">Paid on both the entry and the exit (full fees in every estimate)</td></tr>
+              )}
               <tr><td className="sec">API key</td><td className="num">{s.credentialFingerprint}</td></tr>
               <tr><td className="sec">If you switch back to Demo with a position open</td><td className="num">{String(s.positionPolicyOnSwitchToDemo).replace(/_/g, ' ')}</td></tr>
               <tr><td className="sec">Kill switch with a position open</td><td className="num">{String(s.killSwitchAction).replace(/_/g, ' ')}</td></tr>

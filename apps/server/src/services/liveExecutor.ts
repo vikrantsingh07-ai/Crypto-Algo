@@ -749,7 +749,8 @@ export class LiveExecutor {
     // Bookkeeping only: a failure here must never leave the executor believing a closed position is still open.
     try {
       if (exitFeesKnown) await this.verifyWaiver(trade, exitFee, reason);
-      if (this.waiverEffective() && reason !== 'liquidation' && holdMs > windowMs) {
+      // A long hold is only a surprise when a time limit should have ended the trade; with no limit (the default) it is by design.
+      if (this.waiverEffective() && reason !== 'liquidation' && holdMs > windowMs && this.timeLimitMs() !== null) {
         await this.attend(`Live trade ${t.id} was held ${(holdMs / 60_000).toFixed(1)} min: closed after the Scalper window - closing fee will apply. Check why the exit was delayed.`);
       }
     } catch (e) {

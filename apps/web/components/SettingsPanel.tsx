@@ -8,38 +8,50 @@ import type { Actions } from './Dashboard';
 import { FeeRealityCard } from './scalper';
 import { Card, Tag } from './ui';
 
-type FieldDef =
+type FieldDef = (
   | { path: string; label: string; type: 'number'; step?: number; min?: number; max?: number; help?: string; nullable?: boolean }
   | { path: string; label: string; type: 'text'; help?: string }
   | { path: string; label: string; type: 'bool'; help?: string }
-  | { path: string; label: string; type: 'select'; options: [string, string][]; help?: string };
+  | { path: string; label: string; type: 'select'; options: [string, string][]; help?: string }
+  /** A number that can also be "off" (null): a switch plus a number field that appears when the switch is off. */
+  | { path: string; label: string; type: 'optNumber'; step?: number; min?: number; max?: number; help?: string; offLabel: string; onDefault: number }
+) & {
+  /** Hidden (not just disabled) while this returns false for the current draft. */
+  visible?: (draft: any) => boolean;
+};
 
 interface Group {
   title: string;
-  hint?: ReactNode;
+  hint?: ReactNode | ((draft: any) => ReactNode);
   fields: FieldDef[];
   /** Rendered under the fields, from the current (unsaved) draft. */
   readout?: (draft: any) => ReactNode;
+  /** Hidden while this returns false: a setting an older backend does not have is simply not offered. */
+  visible?: (draft: any) => boolean;
 }
 
 function WaiverReadout({ draft }: { draft: any }) {
   const w = draft?.execution?.exitFeeWaiver;
-  const hold = Number(draft?.exits?.maxHoldMinutes);
-  if (!w || !Number.isFinite(hold)) return null;
-  if (!w.enabled) {
-    return <div className="note-box warn">Offer assumption is <b>OFF</b>: every estimate counts the full closing fee, and the time exit stays at {minutes(hold)}. Turn it ON only if your Delta account has joined the offer.</div>;
+  if (!w?.enabled) return null;
+  const rawHold = draft?.exits?.maxHoldMinutes;
+  const hold = rawHold === null || rawHold === undefined ? null : Number(rawHold);
+  const limited = hold !== null && Number.isFinite(hold) && draft?.exits?.timeExitPolicy !== 'none';
+  if (!limited) {
+    return <div className="note-box warn">There is <b>no time limit</b>, so a trade can outlive the {w.withinMinutes}-minute window and pay the full closing fee. Estimates therefore keep full fees and this switch has no effect until a time limit is set.</div>;
   }
   const eff = effectiveMaxHoldMinutes(draft, true);
   const pastWindow = !w.clampTimeExit && hold >= Number(w.withinMinutes);
   return (
     <div className={`note-box ${pastWindow ? 'warn' : ''}`}>
       {w.clampTimeExit
-        ? <>Time exit is clamped to <b>{minutes(eff)}</b> (window {w.withinMinutes} min − {w.safetyMarginSeconds} s margin){eff < hold ? <>, down from the {minutes(hold)} max hold</> : null}, so even a time exit is a free close.</>
+        ? <>Time exit is clamped to <b>{eff === null ? '—' : minutes(eff)}</b> (window {w.withinMinutes} min − {w.safetyMarginSeconds} s margin){eff !== null && eff < hold ? <>, down from the {minutes(hold)} max hold</> : null}, so even a time exit is a free close.</>
         : <>Time exit is <b>not clamped</b>: it fires at {minutes(hold)}.</>}
       {pastWindow && <> <b>That is at or after the {w.withinMinutes}-min window, so a time exit would pay the full closing fee while estimates still assume it is free.</b></>}
     </div>
   );
 }
+
+const waiverOn = (d: any) => !!d?.execution?.exitFeeWaiver?.enabled;
 
 const GROUPS: Group[] = [
   {
@@ -54,7 +66,11 @@ const GROUPS: Group[] = [
   },
   {
     title: 'Targets & stop-loss (ETH price move, USD)',
-    hint: 'The target is a price move, not profit: $4–$6 on 0.20 ETH = $0.80–$1.20 gross before fees.',
+    hint: (d) => {
+      const t = Number(d?.targets?.targetMoveMaxUsd);
+      const q = Number(d?.position?.quantityEth);
+      return `The target is a price move per ETH, not profit${Number.isFinite(t) && Number.isFinite(q) ? `: $${t} on ${q} ETH = $${(t * q).toFixed(2)} gross, before brokerage on both legs` : ''}. Min = max means a fixed move on every trade.`;
+    },
     fields: [
       { path: 'targets.targetMoveMinUsd', label: 'Target move — min ($)', type: 'number', step: 0.5, min: 0.1 },
       { path: 'targets.targetMoveMaxUsd', label: 'Target move — max ($)', type: 'number', step: 0.5, min: 0.1 },
@@ -65,29 +81,39 @@ const GROUPS: Group[] = [
     ],
   },
   {
-    title: 'Time exit policy',
+    title: 'Time limit & exits',
+    hint: 'By default a trade has NO time limit: it ends at its take-profit or its stop-loss (the stop-loss is always active). A time limit is optional.',
     fields: [
-      { path: 'exits.maxHoldMinutes', label: 'Max holding time (min)', type: 'number', step: 1, min: 1, max: 240, help: 'Hard backstop: market close at this time. While the Scalper Offer is assumed it is shortened to the window minus the safety margin (see below).' },
-      { path: 'exits.timeExitPolicy', label: 'If target not reached', type: 'select', options: [['breakeven_then_close', 'Break-even stop, then close'], ['close_at_market', 'Close at the time limit']] },
-      { path: 'exits.breakevenAfterMinutes', label: 'Break-even stop after (min)', type: 'number', step: 1, min: 1 },
+      { path: 'exits.maxHoldMinutes', label: 'Max holding time (min)', type: 'optNumber', offLabel: 'No time limit', onDefault: 120, step: 1, min: 1, max: 1440, help: 'Only used with the policies “Close at the time limit” or “Break-even stop, then close”. Under “No time exit” a stored limit is ignored.' },
+      { path: 'exits.timeExitPolicy', label: 'If target not reached', type: 'select', options: [['none', 'No time exit (default)'], ['breakeven_then_close', 'Break-even stop, then close at the limit'], ['close_at_market', 'Close at the time limit']], help: 'No time exit: the take-profit or the stop-loss ends the trade.' },
+      { path: 'exits.breakevenAfterMinutes', label: 'Break-even stop after (min)', type: 'number', step: 1, min: 1, help: 'Only used with “Break-even stop, then close”', visible: (d) => d?.exits?.timeExitPolicy === 'breakeven_then_close' },
       { path: 'exits.takeProfitOrderType', label: 'Take-profit order', type: 'select', options: [['limit', 'Resting limit (maker fee)'], ['market', 'Market (taker fee)']] },
     ],
   },
   {
-    title: 'Delta Scalper Offer (closing-fee waiver)',
-    hint: (
-      <>
-        <b>Close within 30 minutes and Delta charges no closing fee</b> (BTCUSD and ETHUSD; 15 min for other futures); the opening fee is still paid. <b>Turn this OFF if your Delta account has not joined the offer</b> (trades taken before joining are not eligible).
-        To stay inside the window the time exit is clamped to window − safety margin (28.5 min by default).
-        <div style={{ marginTop: 4 }}>The offer cannot be read through the Delta API: Demo, backtests and pre-trade checks <i>assume</i> it while this is ON, Live P&amp;L always uses the fee the exchange actually charges, and the assumption is checked against your first eligible live closes.</div>
-        <div style={{ marginTop: 4 }}>{DIWALI_NOTE}</div>
-      </>
-    ),
+    title: 'Daily goal (display only)',
+    hint: 'Shown on the dashboard as a goal. The bot never trades, sizes or relaxes a check to reach it, and it is not a promise.',
+    visible: (d) => d?.goals !== undefined,
+    fields: [{ path: 'goals.dailyProfitInr', label: 'Daily goal (INR)', type: 'number', step: 50, min: 0 }],
+  },
+  {
+    title: 'Closing-fee waiver (optional, off by default)',
+    hint: (d) =>
+      waiverOn(d) ? (
+        <>
+          <b>Close within 30 minutes and Delta charges no closing fee</b> (BTCUSD and ETHUSD; 15 min for other futures); the opening fee is still paid. <b>Turn this OFF if your Delta account has not joined the offer</b> (trades taken before joining are not eligible).
+          It only counts when a time limit keeps every exit inside the window: with no time limit estimates keep full fees. With a time limit the time exit is clamped to window − safety margin (28.5 min by default).
+          <div style={{ marginTop: 4 }}>The offer cannot be read through the Delta API: Demo, backtests and pre-trade checks <i>assume</i> it while this is ON, Live P&amp;L always uses the fee the exchange actually charges, and the assumption is checked against your first eligible live closes.</div>
+          <div style={{ marginTop: 4 }}>{DIWALI_NOTE}</div>
+        </>
+      ) : (
+        'Off. Brokerage is paid on both the entry and the exit (the default). Only switch this on if your Delta account has a closing-fee waiver and you also set a time limit.'
+      ),
     fields: [
-      { path: 'execution.exitFeeWaiver.enabled', label: 'Assume the Scalper Offer (no closing fee inside the window)', type: 'bool', help: 'OFF = count the full closing fee everywhere' },
-      { path: 'execution.exitFeeWaiver.withinMinutes', label: 'Close-within window (min)', type: 'number', step: 1, min: 1, max: 1440, help: '30 for ETHUSD / BTCUSD, 15 for other futures' },
-      { path: 'execution.exitFeeWaiver.safetyMarginSeconds', label: 'Safety margin (s)', type: 'number', step: 5, min: 0, max: 600, help: 'Time exit fires this long before the window ends so a slow fill cannot land after the cut-off' },
-      { path: 'execution.exitFeeWaiver.clampTimeExit', label: 'Clamp the time exit to stay inside the window', type: 'bool', help: 'Max holding time becomes window − margin (28.5 min) while the offer is assumed' },
+      { path: 'execution.exitFeeWaiver.enabled', label: 'Assume a closing-fee waiver (no closing fee inside a time window)', type: 'bool', help: 'OFF = count the full closing fee everywhere' },
+      { path: 'execution.exitFeeWaiver.withinMinutes', label: 'Close-within window (min)', type: 'number', step: 1, min: 1, max: 1440, help: '30 for ETHUSD / BTCUSD, 15 for other futures', visible: waiverOn },
+      { path: 'execution.exitFeeWaiver.safetyMarginSeconds', label: 'Safety margin (s)', type: 'number', step: 5, min: 0, max: 600, help: 'Time exit fires this long before the window ends so a slow fill cannot land after the cut-off', visible: waiverOn },
+      { path: 'execution.exitFeeWaiver.clampTimeExit', label: 'Clamp the time exit to stay inside the window', type: 'bool', help: 'Max holding time becomes window − margin (28.5 min) while the offer is assumed', visible: waiverOn },
     ],
     readout: (d) => <WaiverReadout draft={d} />,
   },
@@ -95,7 +121,7 @@ const GROUPS: Group[] = [
     title: 'Risk limits',
     hint: 'Mandatory. Trades per rolling 24h is capped at 10 by the software.',
     fields: [
-      { path: 'limits.maxTradesPer24h', label: 'Max new trades / rolling 24h', type: 'number', step: 1, min: 1, max: 10 },
+      { path: 'limits.maxTradesPer24h', label: 'Max new trades / rolling 24h', type: 'number', step: 1, min: 1, max: 10, help: 'A ceiling, never a quota: the bot does not trade to fill it' },
       { path: 'limits.perTradeRiskUsd', label: 'Per-trade risk limit ($, net at stop incl. fees)', type: 'number', step: 0.25, min: 0.01 },
       { path: 'limits.dailyLossLimitUsd', label: 'Daily loss limit ($, rolling 24h)', type: 'number', step: 0.5, min: 0.01 },
       { path: 'limits.maxDrawdownPct', label: 'Max drawdown (%)', type: 'number', step: 0.5, min: 0.1, max: 100 },
@@ -143,7 +169,7 @@ const GROUPS: Group[] = [
   },
   {
     title: 'Fees & simulation assumptions',
-    hint: 'Maker/taker rates default to the exchange product values. The closing-fee waiver is set in its own section above.',
+    hint: 'Maker/taker rates default to the exchange product values. Brokerage is charged on both legs. The optional closing-fee waiver has its own section above.',
     fields: [
       { path: 'execution.makerFeeRate', label: 'Maker fee override (fraction)', type: 'number', step: 0.0001, min: 0, nullable: true, help: 'blank = exchange value' },
       { path: 'execution.takerFeeRate', label: 'Taker fee override (fraction)', type: 'number', step: 0.0001, min: 0, nullable: true, help: 'blank = exchange value' },
@@ -176,7 +202,11 @@ function setIn(o: any, path: string, v: unknown) {
   const out = structuredClone(o);
   const ks = path.split('.');
   let cur = out;
-  for (let i = 0; i < ks.length - 1; i++) cur = cur[ks[i]];
+  for (let i = 0; i < ks.length - 1; i++) {
+    // a group an older backend does not have yet is created on the way instead of crashing
+    if (cur[ks[i]] === null || typeof cur[ks[i]] !== 'object') cur[ks[i]] = {};
+    cur = cur[ks[i]];
+  }
   cur[ks[ks.length - 1]] = v;
   return out;
 }
@@ -256,12 +286,12 @@ export default function SettingsPanel({ state, actions }: { state: BotState; act
               {issues.map((i, k) => <li key={k} className={i.severity === 'error' ? 'bad' : 'sec'}><b>{i.severity === 'error' ? 'Error' : 'Warning'}</b> · {i.path}: {i.message}</li>)}
             </ul>
           )}
-          {GROUPS.map((g) => (
+          {GROUPS.filter((g) => !g.visible || g.visible(draft)).map((g) => (
             <fieldset key={g.title} style={{ border: 0, padding: 0, margin: '0 0 18px' }} disabled={readOnly}>
               <legend style={{ fontWeight: 700, padding: 0, marginBottom: 2 }}>{g.title}</legend>
-              {g.hint && <div className="hint" style={{ marginBottom: 8 }}>{g.hint}</div>}
+              {g.hint && <div className="hint" style={{ marginBottom: 8 }}>{typeof g.hint === 'function' ? g.hint(draft) : g.hint}</div>}
               <div className="fields">
-                {g.fields.map((f) => {
+                {g.fields.filter((f) => !f.visible || f.visible(draft)).map((f) => {
                   const val = get(draft, f.path);
                   const errs = byPath.get(f.path) ?? [];
                   const invalid = errs.some((e) => e.severity === 'error');
@@ -273,6 +303,17 @@ export default function SettingsPanel({ state, actions }: { state: BotState; act
                           <input id={id} type="checkbox" checked={!!val} onChange={(e) => edit(f.path, e.target.checked)} />
                           <span>{f.label}</span>
                         </label>
+                      ) : f.type === 'optNumber' ? (
+                        <>
+                          <label htmlFor={id}>{f.label}</label>
+                          <label className="check-row" htmlFor={`${id}-off`} style={{ padding: '2px 0' }}>
+                            <input id={`${id}-off`} type="checkbox" checked={val === null || val === undefined} onChange={(e) => edit(f.path, e.target.checked ? null : f.onDefault)} />
+                            <span>{f.offLabel}</span>
+                          </label>
+                          {val !== null && val !== undefined && (
+                            <input id={id} type="number" step={f.step} min={f.min} max={f.max} value={val} onChange={(e) => edit(f.path, e.target.value === '' ? '' : Number(e.target.value))} />
+                          )}
+                        </>
                       ) : (
                         <>
                           <label htmlFor={id}>{f.label}</label>

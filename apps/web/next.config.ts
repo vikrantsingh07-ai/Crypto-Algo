@@ -2,14 +2,19 @@ import type { NextConfig } from 'next';
 
 const isDev = process.env.NODE_ENV !== 'production';
 
-// The dashboard only ever talks to its own origin (the server-side proxy under /api).
+// The dashboard talks to its own origin (the server-side proxy under /api) and, for the live price / chart / order flow,
+// to Delta Exchange's PUBLIC market-data endpoints straight from the browser (no key, no secret; see lib/market/PROTOCOL.md).
+// public-socket is the documented public WebSocket the feed uses; the other two are listed for the exchange's legacy
+// socket host and public REST host so a documented fallback never needs a redeploy.
+const DELTA_PUBLIC = ['wss://public-socket.india.delta.exchange', 'wss://socket.india.delta.exchange', 'https://api.india.delta.exchange'];
+
 const csp = [
   "default-src 'self'",
   `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  `connect-src 'self' ${DELTA_PUBLIC.join(' ')}`,
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

@@ -1,4 +1,5 @@
 import type { ContractSpec, Evaluation, OpenPosition, Settings } from '@cryptoalgo/core';
+import type { MarketCandle } from './market/types';
 
 export interface RiskCheck {
   code: string;
@@ -35,6 +36,24 @@ export interface Quote {
   last: number;
   mark?: number;
 }
+/**
+ * The simulated account's results for the current IST day. Absent on a backend that predates it: the dashboard then
+ * works it out from the trade list instead (see lib/simple.ts).
+ */
+export interface DemoToday {
+  /** IST calendar day, "YYYY-MM-DD" */
+  day: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  netPnlUsd: number;
+  netPnlInr: number;
+  feesUsd: number;
+  /** the daily goal in INR. A goal only; nothing trades towards it */
+  goalInr: number;
+  /** ceiling of new trades per rolling 24 h */
+  tradesLimit: number;
+}
 export interface DemoSummary {
   startingBalanceUsd: number;
   balanceUsd: number;
@@ -49,6 +68,8 @@ export interface DemoSummary {
   usdInrRate: number;
   lastDecision: Decision | null;
   risk: RiskSummary;
+  /** Absent on an older backend. */
+  today?: DemoToday;
 }
 export interface ExchangeOrder {
   id: number;
@@ -118,7 +139,8 @@ export interface ScalperEconomics {
   liveEffective: boolean;
   windowMinutes: number;
   safetyMarginSeconds: number;
-  effectiveMaxHoldMinutes: number;
+  /** null = no time limit (the default); an older backend always sends a number */
+  effectiveMaxHoldMinutes: number | null;
 }
 export type ScalperStatus = 'unverified' | 'confirmed' | 'not_applied';
 export interface LiveScalperCheck {
@@ -137,13 +159,24 @@ export interface LiveScalper {
   lastCheck: LiveScalperCheck | null;
   windowMinutes: number;
   safetyMarginSeconds: number;
-  effectiveMaxHoldMinutes: number;
+  /** null = no time limit */
+  effectiveMaxHoldMinutes: number | null;
   note: string;
+}
+/** Plain-language brokerage figure: taker entry + taker exit at the current price. Absent on an older backend. */
+export interface RoundTripFee {
+  priceUsd: number;
+  qtyEth: number;
+  notionalUsd: number;
+  entryFeeUsd: number;
+  exitFeeUsd: number;
+  totalFeeUsd: number;
 }
 export interface Economics {
   referencePrice: number;
   contracts: number;
   stopUsd: number;
+  roundTrip?: RoundTripFee;
   /** Rows use the basis in `scalper` (waiver applied when `scalper.effective`). */
   makerTarget: EconRow[];
   takerTarget: EconRow[];
@@ -159,6 +192,13 @@ export interface Economics {
   scalper?: ScalperEconomics;
   rates: { maker: number; taker: number; gst: number };
   verifiedSpec: boolean;
+}
+/** Chart seed and fallback quote from the backend. Absent on an older backend (then `spark` seeds the chart). */
+export interface MarketSnapshot {
+  quote: Quote | null;
+  /** closed 1m candles, oldest first (empty in a slim snapshot) */
+  candles: MarketCandle[];
+  forming?: MarketCandle | null;
 }
 export interface BotState {
   now: number;
@@ -182,6 +222,9 @@ export interface BotState {
   live: LiveSummary;
   economics: Economics | null;
   spark: [number, number][];
+  market?: MarketSnapshot;
+  /** true when the backend left out the bulky chart series (`/api/state?slim=1`) */
+  slim?: boolean;
   settings: Settings;
 }
 

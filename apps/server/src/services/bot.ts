@@ -367,7 +367,8 @@ export class Bot {
     const waived = feeConfigFrom(settings, spec, { waiverOverride: true });
     const t = settings.targets;
     const stop = (t.stopLossMinUsd + t.stopLossMaxUsd) / 2;
-    const moves = [t.targetMoveMinUsd, (t.targetMoveMinUsd + t.targetMoveMaxUsd) / 2, t.targetMoveMaxUsd];
+    // min = max (the default fixed $10 move) gives one row, not three identical ones
+    const moves = [...new Set([t.targetMoveMinUsd, (t.targetMoveMinUsd + t.targetMoveMaxUsd) / 2, t.targetMoveMaxUsd])];
     const row = (move: number, targetRole: 'maker' | 'taker', cfg = fees) => {
       const e = estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + move, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole, stopSlippageUsd: settings.execution.simStopSlippageUsd }, cfg);
       return { moveUsd: move, grossReward: e.rewardGross, fees: e.feeIfTarget, netReward: e.rewardNet, netRewardRisk: e.netRewardRisk, requiredWinRate: breakevenWinRate(e.rewardNet, e.riskNet) };

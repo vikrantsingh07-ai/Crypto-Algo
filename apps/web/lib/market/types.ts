@@ -27,8 +27,10 @@ export interface MarketState {
   bid: number | null;
   ask: number | null;
   mark: number | null;
-  /** % change over the visible candle window (or 24h when the feed provides it) */
+  /** % change: 24h when the feed's ticker has delivered it, otherwise over the loaded candle window (see changeLabel) */
   changePct: number | null;
+  /** what changePct is measured over: "24h" or a window such as "3h"; absent when changePct is null */
+  changeLabel?: string | null;
   /** taker side of the most recent trade */
   lastTradeSide: 'buy' | 'sell' | null;
   /** best first (descending price) */
@@ -59,7 +61,10 @@ export interface UseDeltaMarketOptions {
   contractValue?: number;
   /** order-book levels per side to keep (default 10) */
   levels?: number;
-  /** override for tests / other environments (default wss://socket.india.delta.exchange) */
+  /**
+   * override for tests / other environments. Default wss://public-socket.india.delta.exchange: the documented PUBLIC endpoint
+   * (wss://socket.india.delta.exchange is the private/legacy one), see PROTOCOL.md
+   */
   wsUrl?: string;
   /** set false to disable the browser feed entirely (backend quote only) */
   enabled?: boolean;

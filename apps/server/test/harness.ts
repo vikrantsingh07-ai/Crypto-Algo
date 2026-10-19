@@ -1,15 +1,17 @@
 import { EventEmitter } from 'node:events';
-import type { Candle, Quote, Signal } from '@cryptoalgo/core';
+import { defaultSettings, deepMerge, type Candle, type Quote, type Signal } from '@cryptoalgo/core';
 import type { FeedHealth, MarketFeed } from '@cryptoalgo/delta';
 import { MockDeltaExchange } from '@cryptoalgo/delta/mock';
 import { loadConfig, type AppConfig } from '../src/config';
 import { createDb, migrate, type Db } from '../src/db/db';
 import { createLogger } from '../src/logger';
+import { Repos } from '../src/repos';
 import { createRuntime, type Runtime } from '../src/runtime';
 
 export class FakeFeed extends EventEmitter implements MarketFeed {
   q: Quote | null = null;
   candles: Candle[] = [];
+  forming: Candle | null = null;
   funding: number | null = 0.0001;
   mode: FeedHealth['mode'] = 'ws';
   clock = () => Date.now();
@@ -22,7 +24,7 @@ export class FakeFeed extends EventEmitter implements MarketFeed {
     return this.candles;
   }
   getFormingCandle() {
-    return null;
+    return this.forming;
   }
   getFundingRate() {
     return this.funding;
@@ -77,7 +79,34 @@ export const baseEnv = (ex: MockDeltaExchange, over: Record<string, string> = {}
 /** Permissive risk gates so unit tests can reach the order path (fees make defaults reject most signals). */
 export const RELAXED = { limits: { minNetRewardRisk: 0, minExpectedNetRewardUsd: 0, perTradeRiskUsd: 20, dailyLossLimitUsd: 100, maxDrawdownPct: 90 } };
 
-export async function makeHarness(opts: { ex?: MockDeltaExchange; db?: Db; env?: Record<string, string>; relax?: boolean; startClock?: number; withCredentials?: boolean; keepDb?: boolean } = {}): Promise<Harness> {
+/**
+ * The pre-v2 behaviour (30 minute time exit with the Scalper Offer waiver assumed, $4-$6 targets) for the tests that
+ * exercise the dormant waiver code or the time exit. The defaults are no time limit and brokerage on both legs.
+ */
+export const LEGACY_SCALPER = {
+  targets: { targetMoveMinUsd: 4, targetMoveMaxUsd: 6, stopLossMinUsd: 3, stopLossMaxUsd: 6 },
+  exits: { maxHoldMinutes: 30, timeExitPolicy: 'breakeven_then_close', breakevenAfterMinutes: 15 },
+  execution: { exitFeeWaiver: { enabled: true } },
+};
+
+/** A 30 minute time exit and nothing else changed (the waiver stays off): the time exit without any fee assumption. */
+export const TIME_EXIT_30 = { exits: { maxHoldMinutes: 30, timeExitPolicy: 'close_at_market' } };
+
+export async function makeHarness(
+  opts: {
+    ex?: MockDeltaExchange;
+    db?: Db;
+    env?: Record<string, string>;
+    relax?: boolean;
+    startClock?: number;
+    withCredentials?: boolean;
+    keepDb?: boolean;
+    /** Stored as the settings document (over the schema defaults) BEFORE the runtime starts; only on a fresh database. */
+    seedSettings?: Record<string, unknown>;
+    /** Stored verbatim as the settings document BEFORE the runtime starts (e.g. an old-version document); only on a fresh database. */
+    rawSettings?: unknown;
+  } = {},
+): Promise<Harness> {
   const ex = opts.ex ?? new MockDeltaExchange({ heartbeatMs: 100 });
   if (!opts.ex) await ex.start();
   const env = baseEnv(ex, opts.env);
@@ -92,6 +121,8 @@ export async function makeHarness(opts: { ex?: MockDeltaExchange; db?: Db; env?:
     db = await getSharedDb();
     await migrateIfNeeded(db);
     await resetDb(db);
+    if (opts.rawSettings !== undefined) await new Repos(db).setDoc('settings', opts.rawSettings);
+    else if (opts.seedSettings) await new Repos(db).saveSettings(deepMerge(defaultSettings(), opts.seedSettings));
   }
   const feed = new FakeFeed();
   const clock = { t: opts.startClock ?? Date.now() };

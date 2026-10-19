@@ -229,19 +229,25 @@ export class Repos {
       await this.audit({ actor: 'system', action: 'settings_migration_failed', success: false, details: { from, to: SETTINGS_VERSION, issues: parsed.error.issues.slice(0, 5).map((i) => ({ path: i.path.join('.'), message: i.message })) } }).catch(() => {});
       return { settings: defaultSettings(), migration: null };
     }
-    const written = await this.db.query(
-      `UPDATE app_state SET value = $2::jsonb, updated_at = now()
-       WHERE key = 'settings' AND (CASE WHEN jsonb_typeof(value->'version') = 'number' THEN (value->>'version')::numeric ELSE 1 END) < $1
-       RETURNING key`,
-      [SETTINGS_VERSION, JSON.stringify(parsed.data)],
-    );
-    if (written.length === 0) {
+    const migration: SettingsMigration = { from, to: SETTINGS_VERSION, changed: diffPaths(raw, migrated) };
+    // One transaction: either the upgraded document AND its audit row are stored, or neither is (a crash in between cannot
+    // leave an upgraded document without its audit row, and the compare-and-set below lets only one instance win).
+    const won = await this.db.tx(async (q) => {
+      const written = await q.query(
+        `UPDATE app_state SET value = $2::jsonb, updated_at = now()
+         WHERE key = 'settings' AND (CASE WHEN jsonb_typeof(value->'version') = 'number' THEN (value->>'version')::numeric ELSE 1 END) < $1
+         RETURNING key`,
+        [SETTINGS_VERSION, JSON.stringify(parsed.data)],
+      );
+      if (written.length === 0) return false;
+      await this.audit({ actor: 'system', action: 'settings_migrated', details: migration }, q);
+      return true;
+    });
+    if (!won) {
       // another instance migrated between our read and our write: use what it stored
       const again = SettingsSchema.safeParse(await this.getDoc<unknown>('settings'));
       return { settings: again.success ? again.data : parsed.data, migration: null };
     }
-    const migration: SettingsMigration = { from, to: SETTINGS_VERSION, changed: diffPaths(raw, migrated) };
-    await this.audit({ actor: 'system', action: 'settings_migrated', details: migration });
     return { settings: parsed.data, migration };
   }
 
@@ -391,8 +397,8 @@ export class Repos {
   }
 
   // ---------- audit ----------
-  async audit(e: AuditEntry): Promise<void> {
-    await this.db.query('INSERT INTO audit_log (actor, role, action, success, ip, details) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [
+  async audit(e: AuditEntry, q: Queryable = this.db): Promise<void> {
+    await q.query('INSERT INTO audit_log (actor, role, action, success, ip, details) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [
       e.actor,
       e.role ?? null,
       e.action,

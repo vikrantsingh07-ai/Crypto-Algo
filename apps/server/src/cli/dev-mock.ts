@@ -7,15 +7,16 @@ import { MockDeltaExchange } from '@cryptoalgo/delta/mock';
  * or any real account; use it to try the dashboard, the Live activation flow and the kill switch safely.
  * The mock's prices are a random walk — they are NOT market data.
  *
- * The mock also models Delta's "Scalper Offer" (no closing fee on a position closed within 30 minutes) so the
- * zero-closing-fee path can be exercised end to end. It is ON by default here; set MOCK_SCALPER_OFFER=false to
- * make the mock charge the closing fee (that is how the bot's "offer not applied" detection is exercised).
- * This is a local stand-in only, not a verification of the real exchange.
+ * The mock can also model Delta's "Scalper Offer" (no closing fee on a position closed within 30 minutes) so the
+ * dormant zero-closing-fee code can be exercised end to end. The bot no longer assumes that offer (brokerage is paid
+ * on both legs and positions have no time limit), so it is OFF by default here: the mock charges the closing fee like
+ * the bot's default economics expect. Set MOCK_SCALPER_OFFER=true (and switch the waiver on in the dashboard's
+ * developer settings) to try the dormant path. This is a local stand-in only, not a verification of the real exchange.
  */
 const KEY = 'mock-api-key-0001';
 const SECRET = 'mock-api-secret-0001';
 const port = Number(process.env.MOCK_PORT ?? 9911);
-const scalperOffer = !['false', '0', 'off', 'no'].includes((process.env.MOCK_SCALPER_OFFER ?? 'true').trim().toLowerCase());
+const scalperOffer = ['true', '1', 'on', 'yes'].includes((process.env.MOCK_SCALPER_OFFER ?? 'false').trim().toLowerCase());
 
 const ex = new MockDeltaExchange({ port, apiKey: KEY, apiSecret: SECRET, startingBalance: 500, startPrice: 3000, heartbeatMs: 10_000, scalperOffer: { enabled: scalperOffer, windowMs: 30 * 60_000 } });
 await ex.start();
@@ -59,6 +60,6 @@ if (!process.env.DELTA_API_KEY) {
   process.env.DELTA_API_SECRET = SECRET;
 }
 process.stdout.write(
-  `\n  Mock Delta exchange listening on ${ex.restUrl} (key: ${KEY})\n  Prices are a random walk, NOT market data.\n  Scalper Offer (no closing fee within 30 min) is ${scalperOffer ? 'ON' : 'OFF'} in the mock (MOCK_SCALPER_OFFER=${scalperOffer ? 'true' : 'false'}).\n\n`,
+  `\n  Mock Delta exchange listening on ${ex.restUrl} (key: ${KEY})\n  Prices are a random walk, NOT market data.\n  Scalper Offer (no closing fee within 30 min) is ${scalperOffer ? 'ON' : 'OFF'} in the mock (MOCK_SCALPER_OFFER=${scalperOffer ? 'true' : 'false'}; the bot does not assume it unless switched on).\n\n`,
 );
 await import('../main');

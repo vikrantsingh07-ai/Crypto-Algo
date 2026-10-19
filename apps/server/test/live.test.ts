@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { arm, closeSharedDb, makeHarness, signalAt, type Harness } from './harness';
+import { TIME_EXIT_30, arm, closeSharedDb, makeHarness, signalAt, type Harness } from './harness';
 import { EntryRefusedError } from '../src/services/liveExecutor';
 import { entryOrder } from '@cryptoalgo/delta';
 
@@ -30,14 +30,20 @@ describe('fresh installation is DEMO with live disabled', () => {
     expect(s.instrument.symbol).toBe('ETHUSD');
     expect(s.position.leverage).toBe(50);
     expect(s.position.quantityEth).toBe(0.2);
-    expect(s.targets.targetMoveMinUsd).toBe(4);
-    expect(s.targets.targetMoveMaxUsd).toBe(6);
-    expect(s.exits.maxHoldMinutes).toBe(30);
+    // v2 defaults: a fixed $10 move, a $5-$8 stop, NO time limit, brokerage on both legs (the Scalper Offer is dormant)
+    expect(s.version).toBe(2);
+    expect(s.targets.targetMoveMinUsd).toBe(10);
+    expect(s.targets.targetMoveMaxUsd).toBe(10);
+    expect(s.targets.stopLossMinUsd).toBe(5);
+    expect(s.targets.stopLossMaxUsd).toBe(8);
+    expect(s.exits.maxHoldMinutes).toBeNull();
+    expect(s.exits.timeExitPolicy).toBe('none');
     expect(s.limits.maxTradesPer24h).toBe(10);
-    // Scalper Offer (no closing fee within 30 min) is assumed by default, unverified, with the time exit clamped before the window ends
-    expect(s.execution.exitFeeWaiver).toEqual({ enabled: true, withinMinutes: 30, safetyMarginSeconds: 90, clampTimeExit: true });
+    expect(s.goals.dailyProfitInr).toBe(500);
+    expect(s.execution.exitFeeWaiver).toEqual({ enabled: false, withinMinutes: 30, safetyMarginSeconds: 90, clampTimeExit: true });
     expect(h.rt.live.waiver).toMatchObject({ status: 'unverified', confirmedCount: 0, lastCheck: null });
-    expect(h.rt.live.scalperView()).toMatchObject({ assumed: true, effective: true, effectiveMaxHoldMinutes: 28.5 });
+    expect(h.rt.live.scalperView()).toMatchObject({ assumed: false, effective: false, effectiveMaxHoldMinutes: null });
+    expect(JSON.stringify(h.rt.live.scalperView())).not.toMatch(/Infinity|NaN/);
   });
 
   it('cannot place a real order while disarmed: entry refused and ZERO orders reach the exchange', async () => {
@@ -228,7 +234,8 @@ describe('armed live execution', () => {
     expect(rows[0].status).toBe('failed');
   });
 
-  it('monitor: a time exit (past the clamped 28.5 min limit) closes with a reduce-only market order', async () => {
+  it('monitor: with a 30 minute time limit configured, a time exit closes with a reduce-only market order', async () => {
+    await h.rt.updateSettings(TIME_EXIT_30, 'a', 'admin');
     await enter();
     h.clock.t += 31 * 60_000;
     h.ex.setClock(() => h.clock.t);
@@ -240,6 +247,26 @@ describe('armed live execution', () => {
     expect(openOrders()).toHaveLength(0);
     const exitReq = h.ex.placedOrderRequests.at(-1);
     expect(exitReq).toMatchObject({ reduce_only: true, order_type: 'market_order', side: 'sell' });
+  });
+
+  it('default settings have NO time limit: neither the quote monitor nor the quote-independent backstop ever closes for time, the stop still works', async () => {
+    h.ex.setClock(() => h.clock.t);
+    await enter();
+    const pos = h.rt.live.position!;
+    expect(h.ex.position.size).toBe(20);
+    for (const hours of [1, 3, 5, 30]) {
+      h.clock.t += hours * 3_600_000;
+      await h.rt.live.timeBackstop();
+      await h.rt.live.monitor({ ts: h.clock.t, bid: pos.entryPrice + 0.5, ask: pos.entryPrice + 0.6, last: pos.entryPrice + 0.55 });
+      expect(h.rt.live.position, `still open after ${hours} more hours`).not.toBeNull();
+      expect(h.ex.position.size).toBe(20);
+    }
+    // the protective stop is untouched by the missing time limit: price beyond it closes the trade
+    await h.rt.live.monitor({ ts: h.clock.t, bid: pos.stopPrice - 2, ask: pos.stopPrice - 1.9, last: pos.stopPrice - 1.95 });
+    expect(h.rt.live.position).toBeNull();
+    const t = (await h.rt.repos.listTrades('live'))[0];
+    expect(t.exitReason).toBe('stop_loss');
+    expect(t.holdMs!).toBeGreaterThan(30 * 3_600_000);
   });
 
   it('exchange-side take-profit fill is detected on reconcile; fees and P&L come from the fills', async () => {
@@ -272,6 +299,7 @@ describe('armed live execution', () => {
   });
 
   it('tightens to a break-even stop (new stop placed BEFORE the old one is cancelled)', async () => {
+    await h.rt.updateSettings({ exits: { maxHoldMinutes: 30, timeExitPolicy: 'breakeven_then_close', breakevenAfterMinutes: 15 } }, 'a', 'admin');
     await enter();
     const pos = h.rt.live.position!;
     h.clock.t += 16 * 60_000;
@@ -485,6 +513,7 @@ describe('kill switch and mode switching', () => {
 
   it('Live -> Demo (keep_managing): new live entries stop at once, open real position stays managed and is flagged', async () => {
     await arm(h);
+    await h.rt.updateSettings(TIME_EXIT_30, 'a', 'admin');
     await enter();
     const r = await h.rt.bot.switchToDemo('admin', 'admin');
     expect(r).toMatchObject({ policy: 'keep_managing', livePositionOpen: true });
@@ -494,7 +523,7 @@ describe('kill switch and mode switching', () => {
     expect(st.attention.join(' ')).toMatch(/Live position still open/);
     const again = await enter('long', T + 9000);
     expect(again.allowed).toBe(false);
-    // the open position's time exit still works
+    // the open position's configured time exit still works
     h.clock.t += 31 * 60_000;
     await h.rt.live.monitor({ ts: h.clock.t, bid: 3001, ask: 3001.1, last: 3001 });
     expect(h.ex.position.size).toBe(0);

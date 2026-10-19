@@ -147,7 +147,14 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
   // ------------------------------------------------------------------ read (viewer+)
   app.get('/api/auth/me', readViewer, async (req) => ({ username: req.principal!.username, role: req.principal!.role }));
 
-  app.get('/api/state', readViewer, async () => ({ ...rt.bot.snapshot(), serverTime: Date.now() }));
+  // `?slim=1` leaves out the two bulky chart series (state.market.candles and spark, ~2/3 of the body): a dashboard that
+  // polls every second fetches the full state once and the slim one in between. Every other key is identical.
+  app.get('/api/state', readViewer, async (req) => {
+    const snap = rt.bot.snapshot();
+    const slim = ['1', 'true'].includes(String((req.query as { slim?: unknown } | undefined)?.slim ?? ''));
+    if (!slim) return { ...snap, serverTime: Date.now() };
+    return { ...snap, market: { ...snap.market, candles: [] }, spark: [], slim: true, serverTime: Date.now() };
+  });
 
   app.get('/api/settings', readViewer, async () => ({ settings: rt.getSettings(), spec: rt.getSpec() }));
 

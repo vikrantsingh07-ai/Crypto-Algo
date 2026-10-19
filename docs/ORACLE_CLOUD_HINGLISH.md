@@ -3,8 +3,8 @@
 Yeh guide Render ki jagah Oracle Cloud ka VM use karne ke liye hai. Dashboard phir bhi Vercel par rehta hai (`docs/SUBAH_DEPLOY_HINGLISH.md`, Step C). Is guide ka matlab sirf **Step A (Neon) aur Step B (Render) ki jagah** hai: Oracle VM par database bhi usi VM par chalta hai, to Neon ki zaroorat nahi.
 
 **Kya verify hua aur kya nahi (zaroor padho):**
-- Verify hua: `deploy/oracle/setup.sh` ka dry-run (galat password/secret rok deta hai, secrets ek baar bante hain aur dobara chalane par nahi badalte, `.env` ki permission 600), `docker-compose.yml` valid hai, aur jo `.env` banta hai use asli server config production mode me accept karta hai (`apps/server/test/deploy-oracle.test.ts`). Dockerfile GitHub CI par sach me build hua aur container ka health check pass hua (amd64).
-- **Verify NAHI hua:** asli Oracle VM par first boot, Oracle console ke menu/button ke naam (yaad se likhe hain, thode alag ho sakte hain), Let's Encrypt certificate `sslip.io` naam par, ARM (Ampere A1) par build, Docker ka `get.docker.com` install us VM par. Pehli baar chalane par kuch atak sakta hai: "Agar kuch na chale" section dekho.
+- Verify hua: `deploy/oracle/setup.sh` ka dry-run (galat password/secret rok deta hai, secrets ek baar bante hain aur dobara chalane par nahi badalte, `.env` ki permission 600), `docker-compose.yml` valid hai, aur jo `.env` banta hai use asli server config production mode me accept karta hai (`apps/server/test/deploy-oracle.test.ts`). Dockerfile GitHub CI par sach me build hua aur container ka health check pass hua (amd64). `deploy/oracle/update.sh` ek local git repository aur nakli `docker` ke saath chalayi gayi (`apps/server/test/deploy-update.test.ts`): pull, rebuild, health ka intezaar, local badlav par inkaar, dry run, log me secrets chhupe.
+- **Verify NAHI hua:** asli Oracle VM par first boot aur asli VM par `update.sh`, Oracle console ke menu/button ke naam (yaad se likhe hain, thode alag ho sakte hain), Let's Encrypt certificate `sslip.io` naam par, ARM (Ampere A1) par build, Docker ka `get.docker.com` install us VM par. Pehli baar chalane par kuch atak sakta hai: "Agar kuch na chale" section dekho.
 
 ## Kya milega
 
@@ -50,7 +50,7 @@ Vercel project → Settings → Environment Variables:
 - `BACKEND_URL` = `https://129-146-10-20.sslip.io` (apna naam; https se shuru, end me `/` nahi)
 - `PROXY_SHARED_SECRET` = Step 1 wali **wahi** value
 
-Phir Deployments → latest → **Redeploy**. Ab `https://crypto-algo.vercel.app/login` par `admin` aur apna `ADMIN_PASSWORD` se login karo. Demo mode chalega (LIVE TRADING DISABLED).
+Phir Deployments → latest → **Redeploy**. Ab `https://crypto-algo.vercel.app/login` par `admin` aur apna `ADMIN_PASSWORD` se login karo. Demo mode chalega (LIVE TRADING DISABLED): saaf dashboard khulega jisme ETH ka bada price, live chart, order flow (khareedaar baayein hare, bechne wale daayein laal), simulated account aur algo kya kar raha hai woh dikhta hai. Price aapka browser seedha Delta ke public feed se leta hai; agar woh na mile to price pe "Delayed" likha aata hai aur backend ka price dikhta hai. Purane technical tabs ke liye upar **Menu → Developer view**.
 
 ## Delta ke liye fixed IP (sirf Live ke waqt)
 
@@ -98,10 +98,54 @@ cat /opt/cryptoalgo/STATUS.txt                   # BACKEND_URL wagairah (secrets
 
 ## Naya version lagana / band karna
 
+### Backend update: ek hi command
+
+Jab `main` branch par naya code aaye to **dashboard (Vercel) apne aap update ho jata hai**, uske liye kuch nahi karna. Sirf backend (VM) ko update karna padta hai, aur uske liye ek command kaafi hai. Koi password ya secret type nahi karna: script wahi `.env` use karti hai jo pehli baar `setup.sh` ne banayi thi.
+
+Phone se: Oracle console me upar **Cloud Shell** (`>_`) kholo (private key pehle jaise upload karo), phir:
+
 ```
-cd /opt/cryptoalgo && sudo git pull --ff-only
-sudo ADMIN_PASSWORD=... PROXY_SHARED_SECRET=... bash deploy/oracle/setup.sh   # rebuild + restart, secrets wahi rehte hain
-cd deploy/oracle && sudo docker compose down        # band (data rehta hai); "up -d" se wapas
+chmod 600 ~/<key-file>
+ssh -i ~/<key-file> ubuntu@<VM-IP> "sudo bash /opt/cryptoalgo/deploy/oracle/update.sh"
 ```
+
+VM ke andar ho to bas: `sudo bash /opt/cryptoalgo/deploy/oracle/update.sh`
+
+Script ye kaam is order me karti hai:
+1. Check karti hai ki koi dusra update to nahi chal raha, aur VM par kisi file me haath se badlav to nahi hai. Badlav mila to file ke naam dikhakar ruk jati hai, kuch badalti nahi.
+2. Naya code leti hai (`git pull`, sirf aage badhne wala).
+3. Naya docker image banati hai aur restart karti hai. Isme kuch minute lagte hain, 1 GB wali VM par 10-20 minute bhi.
+4. 5 minute tak backend ke health check ka intezaar karti hai.
+
+Aakhir me kya likha aata hai:
+
+| Dikha | Matlab / kya karo |
+|---|---|
+| `OK: the backend runs <commit> and is healthy` | Update ho gaya. `https://<naam>.sslip.io/api/health` me `ok:true` dekh sakte ho. |
+| `NOT healthy after 300s` aur 40 log lines | Naya version theek se start nahi hua. Log lines ka screenshot developer ko bhejo. Script khud purane commit par wapas jaane ka command bhi likh deti hai (secrets log me `***` se chhupe hote hain). |
+| `the working tree ... has local changes` | VM par kisi file me haath se badlav hua hai, isliye script ruk gayi. Kuch badla nahi gaya. Developer se poochho. |
+| `git pull --ff-only failed` | Network nahi, ya history alag ho gayi. Purana version chalta rahega. |
+| `another update is already running` | Pehla update khatam hone do. |
+
+Pehle sirf check karna ho (kuch badalta nahi): `sudo DRY_RUN=1 bash /opt/cryptoalgo/deploy/oracle/update.sh`
+
+### Update ke baad kya badalta hai (settings version 2)
+
+Naye backend ke **pehle start par** saved settings ek baar apne aap upgrade hoti hain (audit log me ek `settings_migrated` entry banti hai):
+- Position par **koi time limit nahi** (pehle 30 minute tha). Trade ghanton chal sakta hai, raat bhar bhi, aur funding payments beech me aati hain. Stop-loss hamesha lagi rehti hai.
+- Target fixed **$10 per ETH**, stop **$5 se $8** ke beech.
+- Closing-fee waiver (Scalper Offer) band: brokerage entry aur exit **dono** par lagti hai (0.20 ETH par lagbhag $0.80, ETH ~$3,390 par).
+- Roz ka goal 500 INR sirf dikhane ke liye. Yeh goal hai, vaada nahi, aur bot goal poora karne ke liye trade nahi karta.
+- Baaki sab (quantity, leverage, risk limits, filters, INR rate...) jaisa tha waisa hi rehta hai. Agar aapne target ya stop haath se badle the to Developer view → Strategy & Risk me dobara set karo.
+
+Dhyan do: update tab karo jab koi trade khula na ho (to behtar). Ek hi database par purana aur naya backend ek saath mat chalao (jaise Render aur Oracle dono). Is VM par purana container naye se badal jata hai, to koi dikkat nahi.
+
+### Band karna, aur `setup.sh` kab
+
+```
+cd /opt/cryptoalgo/deploy/oracle && sudo docker compose down        # band (data rehta hai); "up -d" se wapas
+```
+
+`setup.sh` sirf pehli install ke liye hai, ya jab `ADMIN_PASSWORD`, `PROXY_SHARED_SECRET` ya IP badalna ho (upar ke tables me bataya hai). Normal update me iski zaroorat nahi.
 
 Database ka backup: `sudo docker compose -f /opt/cryptoalgo/deploy/oracle/docker-compose.yml exec db pg_dump -U cryptoalgo cryptoalgo > backup.sql`.

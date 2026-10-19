@@ -42,7 +42,7 @@ function ScalperOfferCard({ state, actions }: { state: BotState; actions: Action
         <tbody>
           <tr><td className="sec">Assumed in settings</td><td className="num">{v.assumed ? 'ON' : 'OFF'}</td></tr>
           <tr><td className="sec">Live pre-trade economics</td><td className="num">{v.effective ? <>closing fee <b>free</b> inside {v.windowMin} min</> : <b className={v.assumed ? 'bad' : undefined}>full closing fee counted</b>}</td></tr>
-          <tr><td className="sec">Time exit</td><td className="num">{minutes(v.effectiveMaxHoldMin)}{v.clamped ? ` (configured ${v.configuredMaxHoldMin}; ${v.marginSec} s margin before the ${v.windowMin}-min cut-off)` : ''}</td></tr>
+          <tr><td className="sec">Time exit</td><td className="num">{v.effectiveMaxHoldMin === null ? 'none — no time limit' : minutes(v.effectiveMaxHoldMin)}{v.clamped ? ` (configured ${v.configuredMaxHoldMin}; ${v.marginSec} s margin before the ${v.windowMin}-min cut-off)` : ''}</td></tr>
           <tr><td className="sec">Eligible closes confirmed</td><td className="num">{sc ? sc.confirmedCount : '—'}</td></tr>
           <tr>
             <td className="sec">Last check</td>
@@ -174,9 +174,11 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
         </Card>
       </div>
 
-      <div className="grid">
-        <ScalperOfferCard state={state} actions={actions} />
-      </div>
+      {v.assumed && (
+        <div className="grid">
+          <ScalperOfferCard state={state} actions={actions} />
+        </div>
+      )}
 
       <div className="grid g-2">
         <Card title="Exchange positions" hint="From the exchange (real-time position endpoint)" right={<Tag kind="real">Real</Tag>}>
@@ -197,12 +199,20 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
               </table>
               {tracked && (
                 <>
+                  {v.assumed && (
+                    <div style={{ marginTop: 10 }}>
+                      {v.effective ? <ExitFeeClock entryTs={tracked.entryTs} windowMin={v.windowMin} now={now} /> : <span className="fee-clock off">Closing fee is charged in full (offer not applied).</span>}
+                    </div>
+                  )}
                   <div style={{ marginTop: 10 }}>
-                    {v.effective ? <ExitFeeClock entryTs={tracked.entryTs} windowMin={v.windowMin} now={now} /> : <span className="fee-clock off">Closing fee is charged in full ({v.assumed ? 'offer not applied' : 'offer switched off'}).</span>}
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Holding · time exit at {minutes(v.effectiveMaxHoldMin)}</span><span className="tabnum">{duration(Math.max(0, now - tracked.entryTs))} / {duration(v.effectiveMaxHoldMin * 60_000)}</span></div>
-                    <Meter value={Math.max(0, now - tracked.entryTs)} max={v.effectiveMaxHoldMin * 60_000} label="Holding time" />
+                    {v.effectiveMaxHoldMin === null ? (
+                      <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Open for · no time limit</span><span className="tabnum">{duration(Math.max(0, now - tracked.entryTs))}</span></div>
+                    ) : (
+                      <>
+                        <div className="sec" style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>Holding · time exit at {minutes(v.effectiveMaxHoldMin)}</span><span className="tabnum">{duration(Math.max(0, now - tracked.entryTs))} / {duration(v.effectiveMaxHoldMin * 60_000)}</span></div>
+                        <Meter value={Math.max(0, now - tracked.entryTs)} max={v.effectiveMaxHoldMin * 60_000} label="Holding time" />
+                      </>
+                    )}
                   </div>
                 </>
               )}
@@ -249,7 +259,7 @@ export default function LivePanel({ state, actions }: { state: BotState; actions
 
       <div className="grid">
         <Card title="Live trade history" hint="Real exchange trades only — demo trades are never shown here" right={<Tag kind="real">Real</Tag>}>
-          <TradesTable rows={rows} mode="live" windowMin={v.windowMin} />
+          <TradesTable rows={rows} mode="live" windowMin={v.assumed ? v.windowMin : null} />
         </Card>
       </div>
 

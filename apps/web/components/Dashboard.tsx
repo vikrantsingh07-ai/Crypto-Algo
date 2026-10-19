@@ -2,17 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
-import { ago, num } from '@/lib/format';
-import { scalperView } from '@/lib/scalper';
+import { mergeSlimState } from '@/lib/simple';
 import type { BotState, Me } from '@/lib/types';
-import ActivationWizard from './ActivationWizard';
-import AnalyticsPanel from './AnalyticsPanel';
-import DemoPanel from './DemoPanel';
-import LivePanel from './LivePanel';
-import SettingsPanel from './SettingsPanel';
+import DeveloperView, { type Tab } from './DeveloperView';
+import { Skeleton } from './simple/bits';
+import type { SimplePage } from './simple/Header';
+import SimpleView from './simple/SimpleView';
 import { Modal, Toast } from './ui';
-
-type Tab = 'demo' | 'live' | 'settings' | 'analytics';
 
 export interface Actions {
   isAdmin: boolean;
@@ -23,9 +19,22 @@ export interface Actions {
   confirmKill: () => void;
 }
 
+type View = 'simple' | 'developer';
+const VIEW_KEY = 'ca_view';
+/** The bulky chart series (candles, spark) are fetched in full this often; the polls in between ask for the slim snapshot. */
+const FULL_STATE_EVERY_MS = 30_000;
+const POLL_VISIBLE_MS = 2000;
+const POLL_HIDDEN_MS = 10_000;
+
+/**
+ * Owns what both views share: the polled backend snapshot, who is signed in, the toast, and the modals (activation wizard,
+ * switch to demo, kill switch). The simple view is the default; "Developer view" in its menu opens the original tabs.
+ */
 export default function Dashboard() {
   const [state, setState] = useState<BotState | null>(null);
   const [me, setMe] = useState<Me | null>(null);
+  const [view, setView] = useState<View | null>(null);
+  const [page, setPage] = useState<SimplePage>('overview');
   const [tab, setTab] = useState<Tab>('demo');
   const [lost, setLost] = useState<string | null>(null);
   const [toast, setToast] = useState<{ msg: string; err?: boolean } | null>(null);
@@ -35,6 +44,8 @@ export default function Dashboard() {
   const [killReason, setKillReason] = useState('');
   const [, force] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastFullAt = useRef(0);
+  const reqSeq = useRef({ sent: 0, applied: 0 });
 
   const notify = useCallback((msg: string, err = false) => {
     setToast({ msg, err });
@@ -43,9 +54,16 @@ export default function Dashboard() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const seq = ++reqSeq.current.sent;
     try {
-      const s = await api<BotState>('GET', 'state');
-      setState(s);
+      const wantFull = Date.now() - lastFullAt.current > FULL_STATE_EVERY_MS;
+      const s = await api<BotState>('GET', wantFull ? 'state' : 'state?slim=1');
+      // two requests can overlap (a poll and a refresh after an action): never let the older answer replace the newer one
+      if (seq < reqSeq.current.applied) return;
+      reqSeq.current.applied = seq;
+      // an older backend ignores ?slim and sends everything: that counts as a full snapshot too
+      if (!s.slim) lastFullAt.current = Date.now();
+      setState((prev) => mergeSlimState(prev, s));
       setLost(null);
     } catch (e) {
       if (e instanceof ApiError && e.status === 502) setLost('The trading backend is unreachable from the dashboard.');
@@ -55,22 +73,52 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
+    try {
+      setView(localStorage.getItem(VIEW_KEY) === 'developer' ? 'developer' : 'simple');
+    } catch {
+      setView('simple');
+    }
     void api<Me>('GET', 'auth/me').then(setMe).catch(() => {});
     void refresh();
     let timer: ReturnType<typeof setTimeout>;
-    const loop = () => {
-      timer = setTimeout(async () => {
-        if (!document.hidden) await refresh();
-        loop();
-      }, document.hidden ? 8000 : 2000);
-    };
-    loop();
-    const tick = setInterval(() => force((n) => n + 1), 1000);
-    return () => {
+    let stopped = false;
+    // every 2 s while the tab is visible, every 10 s while it is hidden; coming back to the tab refreshes at once
+    const schedule = () => {
       clearTimeout(timer);
-      clearInterval(tick);
+      timer = setTimeout(async () => {
+        await refresh();
+        if (!stopped) schedule();
+      }, document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS);
+    };
+    const onVisibility = () => {
+      if (!document.hidden) void refresh();
+      schedule();
+    };
+    schedule();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [refresh]);
+
+  // The developer panels count down with the server clock; the simple view drives its own tickers.
+  useEffect(() => {
+    if (view !== 'developer') return;
+    const tick = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(tick);
+  }, [view]);
+
+  const choose = useCallback((v: View) => {
+    setView(v);
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      /* storage blocked: the choice just applies for this visit */
+    }
+    window.scrollTo(0, 0);
+  }, []);
 
   const isAdmin = me?.role === 'admin';
 
@@ -109,39 +157,7 @@ export default function Dashboard() {
     window.location.href = '/login';
   }
 
-  if (!state) {
-    return (
-      <div className="shell">
-        <div className="login-wrap" style={{ minHeight: '60vh' }}>
-          <div className="card">{lost ? <span className="bad">{lost}</span> : 'Loading dashboard…'}</div>
-        </div>
-      </div>
-    );
-  }
-
-  const live = state.mode === 'live';
-  const armed = state.liveArmed;
-  const label = state.killSwitch
-    ? 'KILL SWITCH ENGAGED — ALL NEW ENTRIES BLOCKED'
-    : !live
-      ? 'DEMO MODE — LIVE TRADING DISABLED'
-      : armed
-        ? state.deployment.realMoney
-          ? 'LIVE MODE — REAL ORDERS ENABLED'
-          : 'LIVE MODE (TESTNET) — SANDBOX ORDERS ENABLED, NO REAL FUNDS'
-        : 'LIVE SELECTED — EXECUTION NOT ARMED';
-  const statusClass = state.killSwitch ? 'kill' : live ? 'live' : 'demo';
-  const h = state.feed.health;
-  const feedDot = h.mode === 'ws' || h.mode === 'synthetic' ? 'good' : h.mode === 'rest-fallback' ? 'warn' : 'crit';
-  const feedLabel = h.mode === 'ws' ? 'WebSocket live' : h.mode === 'rest-fallback' ? 'REST fallback' : h.mode === 'synthetic' ? 'SYNTHETIC' : 'DOWN';
-  const cred = state.live.credentials;
-  const apiDot = !cred.configured ? 'warn' : state.live.account.error ? 'crit' : state.live.account.fetchedAt ? 'good' : 'warn';
-  const apiLabel = !cred.configured ? 'not configured' : state.live.account.error ? 'error' : state.live.account.fetchedAt ? 'connected' : 'connecting';
-  const q = state.feed.quote;
-  const sv = scalperView(state, 'live');
-  const lsc = state.live.scalper;
-  const scDot = !sv.assumed ? '' : lsc?.status === 'not_applied' ? 'crit' : lsc?.status === 'confirmed' ? 'good' : 'warn';
-  const scLabel = !sv.assumed ? 'off · full closing fee' : lsc?.status === 'not_applied' ? 'NOT APPLIED · full fees' : lsc?.status === 'confirmed' ? `confirmed ×${lsc.confirmedCount}` : `assumed · no closing fee ≤ ${sv.windowMin} min`;
+  if (!state || !view) return <LoadingScreen lost={lost} retry={() => void refresh()} />;
 
   const actions: Actions = {
     isAdmin: !!isAdmin,
@@ -153,98 +169,45 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="shell">
-      <div className="topbar">
-        <div className="topline">
-          <div className="brand">
-            <h1>CryptoAlgo</h1>
-            <span className="sub">{state.spec.symbol} perpetual · {state.feed.synthetic ? 'SYNTHETIC DEV DATA (not Delta)' : state.deployment.exchange}</span>
-          </div>
-          <div className="top-actions">
-            {q && (
-              <span className="tabnum" style={{ fontWeight: 700, fontSize: 16 }} title="Last traded price">
-                {state.spec.symbol} ${num(q.last)} <span className="muted" style={{ fontWeight: 400, fontSize: 12 }}>bid {num(q.bid)} / ask {num(q.ask)}</span>
-              </span>
-            )}
-            <button className={`btn sm kill`} disabled={!isAdmin || busy} onClick={actions.confirmKill} title="Emergency stop: blocks every new entry and disarms live execution">
-              {state.killSwitch ? 'KILL SWITCH ENGAGED · Release' : '⏻ KILL SWITCH'}
-            </button>
-            <button className="btn sm ghost" onClick={toggleTheme} aria-label="Toggle light/dark theme">Theme</button>
-            <button className="btn sm ghost" onClick={logout}>Sign out{me ? ` (${me.username})` : ''}</button>
-          </div>
-        </div>
-
-        <div className="mode-row">
-          <div className="mode-switch" role="group" aria-label="Trading mode">
-            <button className="mode-btn demo" aria-pressed={!live} onClick={() => (live ? actions.confirmDemoSwitch() : setTab('demo'))} disabled={!isAdmin && live}>
-              DEMO TRADING
-            </button>
-            <button className="mode-btn live" aria-pressed={live} onClick={() => (isAdmin ? setWizard(true) : notify('Only an administrator can enable Live Trading', true))} title="Opens the safety checks and confirmation. Selecting Live never places an order by itself.">
-              LIVE TRADING
-            </button>
-          </div>
-          <div className={`mode-status ${statusClass}`} role="status" aria-live="polite">
-            <span className="big">{label}</span>
-            <span className="sec" style={{ fontSize: 12 }}>
-              Bot {state.running ? <b>running</b> : <b>stopped</b>} · worker {state.workerActive ? 'active' : <b className="bad">not active on this instance</b>}
-              {live && !armed && ' · live orders are impossible until activation completes'}
-              {!live && ' · simulated orders and virtual balance only'}
-            </span>
-          </div>
-        </div>
-
-        <div className="statusbar" aria-label="Connection status">
-          <span><i className={`dot ${feedDot}`} />Market data: <b>{feedLabel}</b>{state.feed.ageMs !== null && ` · last tick ${ago(q?.ts, state.now)}`}</span>
-          <span><i className={`dot ${apiDot}`} />Exchange account API: <b>{apiLabel}</b>{cred.fingerprint && ` · ${cred.keyHint}`}</span>
-          <span><i className={`dot ${state.live.reconciled ? 'good' : cred.configured ? 'warn' : ''}`} />Reconciliation: <b>{state.live.reconciled ? 'in sync' : cred.configured ? 'not in sync' : 'n/a'}</b></span>
-          <span><i className={`dot ${scDot}`} />Scalper Offer: <b>{scLabel}</b></span>
-          <span className="muted">{state.deployment.realMoney ? 'Environment: production' : 'Environment: sandbox/testnet'}</span>
-        </div>
-
-        <div className="tabs" role="tablist">
-          {(
-            [
-              ['demo', 'Demo Trading', 'Demo'],
-              ['live', 'Live Trading', 'Live'],
-              ['settings', 'Strategy & Risk', 'Strategy'],
-              ['analytics', 'Analytics', 'Analytics'],
-            ] as [Tab, string, string][]
-          ).map(([k, t, short]) => (
-            <button key={k} role="tab" aria-selected={tab === k} aria-label={t} className={`tab ${k === 'live' ? 'livetab' : ''}`} onClick={() => setTab(k)}>
-              <span className="long">{t}</span><span className="short">{short}</span>{k === 'live' && (armed ? ' ●' : '')}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {lost && <div className="banner crit" role="alert"><span className="icon">!</span><div><b>Connection problem.</b> {lost} Data shown below may be stale (last update {ago(state.now)}).</div></div>}
-      {state.feed.synthetic && <div className="banner warn" role="alert"><span className="icon">⚠</span><div><b>SYNTHETIC DEVELOPMENT DATA.</b> Prices are randomly generated, not from Delta Exchange. Never use this for decisions. Live trading is impossible in this mode.</div></div>}
-      {state.deployment.liveHardDisabled && <div className="banner info"><span className="icon">🔒</span><div>Live trading is <b>hard-disabled by the server deployment</b> (LIVE_HARD_DISABLE).</div></div>}
-      {!state.workerActive && <div className="banner warn" role="alert"><span className="icon">!</span><div><b>Trading worker is not active on this server instance.</b> Another instance holds the lease or the worker is disabled; commands are unavailable here.</div></div>}
-      {state.attention.length > 0 && (
-        <div className="banner crit" role="alert">
-          <span className="icon">!</span>
-          <div style={{ flex: 1 }}>
-            <b>Needs your attention</b>
-            <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{state.attention.map((a, i) => <li key={i}>{a}</li>)}</ul>
-          </div>
-          {isAdmin && <button className="btn sm" onClick={() => run('Clear', () => api('POST', 'attention/clear'), 'Cleared')}>Acknowledge</button>}
-        </div>
+    <>
+      {view === 'simple' ? (
+        <SimpleView
+          state={state}
+          me={me}
+          actions={actions}
+          lost={lost}
+          page={page}
+          setPage={(p) => {
+            setPage(p);
+            window.scrollTo(0, 0);
+          }}
+          onDeveloper={() => choose('developer')}
+          onLogout={logout}
+          onToggleTheme={toggleTheme}
+        />
+      ) : (
+        <DeveloperView
+          state={state}
+          me={me}
+          actions={actions}
+          lost={lost}
+          busy={busy}
+          tab={tab}
+          setTab={setTab}
+          wizard={wizard}
+          closeWizard={() => setWizard(false)}
+          onWizardDone={async () => {
+            setWizard(false);
+            await refresh();
+            setTab('live');
+            notify('Live execution armed');
+          }}
+          onSimple={() => choose('simple')}
+          onLogout={logout}
+          onToggleTheme={toggleTheme}
+          notify={notify}
+        />
       )}
-      {!state.spec.verified && <div className="banner warn"><span className="icon">!</span><div>Contract details have not been read from the exchange yet; documented fallback values are shown. <b>Live activation is blocked</b> until they are verified.</div></div>}
-
-      <main>
-        {tab === 'demo' && <DemoPanel state={state} actions={actions} />}
-        {tab === 'live' && <LivePanel state={state} actions={actions} />}
-        {tab === 'settings' && <SettingsPanel state={state} actions={actions} />}
-        {tab === 'analytics' && <AnalyticsPanel state={state} />}
-      </main>
-
-      <p className="muted" style={{ marginTop: 28, fontSize: 12 }}>
-        Trading derivatives with leverage can lose more than expected, including your entire deposit. Demo results are simulated and Backtests are historical; neither guarantees future results.
-      </p>
-
-      {wizard && <ActivationWizard state={state} onClose={() => setWizard(false)} onDone={async () => { setWizard(false); await refresh(); setTab('live'); notify('Live execution armed'); }} />}
 
       {confirm === 'demo' && (
         <Modal
@@ -310,7 +273,51 @@ export default function Dashboard() {
       )}
 
       <Toast message={toast?.msg ?? null} error={toast?.err} />
-      <span className="sr-only" aria-live="polite">{label}</span>
+      <span className="sr-only" aria-live="polite">{state.killSwitch ? 'Emergency stop is on' : state.mode === 'live' && state.liveArmed ? 'Live mode' : 'Demo mode, simulated'}</span>
+    </>
+  );
+}
+
+/** First paint: the shape of the page as grey placeholders, or a calm "Reconnecting..." when the first request fails. */
+function LoadingScreen({ lost, retry }: { lost: string | null; retry: () => void }) {
+  return (
+    <div className="sv" aria-busy={!lost}>
+      <header className="sv-header">
+        <div className="sv-header-row">
+          <div className="sv-brand">
+            <span className="sv-logo" aria-hidden>C</span>
+            <div><h1>CryptoAlgo</h1></div>
+          </div>
+        </div>
+        <div className="sv-chips"><Skeleton h={34} w={250} r={999} /></div>
+      </header>
+      {lost && (
+        <div className="sv-banner warn" role="alert">
+          <div><b>Reconnecting...</b> The dashboard cannot reach the server yet. It keeps trying.</div>
+          <button className="sv-btn" onClick={retry}>Try now</button>
+        </div>
+      )}
+      <div className="sv-grid" role="status" aria-label="Loading the dashboard">
+        <section className="card sv-card" style={{ gridArea: 'price' }}>
+          <Skeleton h={22} w="30%" />
+          <Skeleton h={52} w="55%" style={{ marginTop: 12 }} />
+          <Skeleton h={220} style={{ marginTop: 16 }} />
+        </section>
+        <section className="card sv-card" style={{ gridArea: 'flow' }}>
+          <Skeleton h={22} w="35%" />
+          <Skeleton h={280} style={{ marginTop: 16 }} />
+        </section>
+        <section className="card sv-card" style={{ gridArea: 'account' }}>
+          <Skeleton h={22} w="45%" />
+          <Skeleton h={90} style={{ marginTop: 16 }} />
+          <Skeleton h={60} style={{ marginTop: 12 }} />
+        </section>
+        <section className="card sv-card" style={{ gridArea: 'activity' }}>
+          <Skeleton h={22} w="40%" />
+          <Skeleton h={120} style={{ marginTop: 16 }} />
+          <Skeleton h={60} style={{ marginTop: 12 }} />
+        </section>
+      </div>
     </div>
   );
 }

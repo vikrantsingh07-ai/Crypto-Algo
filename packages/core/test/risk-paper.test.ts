@@ -198,6 +198,13 @@ describe('risk manager', () => {
       expect(failed(decide({}, tight, sig(5), q3390))).not.toContain('PER_TRADE_RISK');
     });
 
+    it('no risk-check message talks about the removed Scalper Offer / waiver / 30 minutes at the defaults', () => {
+      const d = decide({}, settings(), sig(6), q3390);
+      expect(d.checks.length).toBeGreaterThan(10);
+      for (const c of d.checks) expect(c.message, c.code).not.toMatch(/scalper|waiver|waived|30[- ]min/i);
+      expect(d.checks.find((c) => c.code === 'PER_TRADE_RISK')!.message).toMatch(/brokerage on both legs/);
+    });
+
     it('the 10-trades-per-24h ceiling is unchanged and the default limits keep every other gate', () => {
       const entries = Array.from({ length: 10 }, (_, i) => ({ ts: T0 - (i + 1) * 3_600_000 }));
       expect(failed(decide({ entries }, settings(), sig(6), q3390))).toEqual(['MAX_TRADES_24H']);

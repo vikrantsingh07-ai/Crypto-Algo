@@ -3,10 +3,12 @@ import { MockDeltaExchange } from '@cryptoalgo/delta/mock';
 import { reduceOnlyMarket } from '@cryptoalgo/delta';
 import { buildApi } from '../src/api';
 import { loadCandles, runBacktestJob } from '../src/services/backtestService';
-import { arm, closeSharedDb, makeHarness, signalAt, type Harness } from './harness';
+import { LEGACY_SCALPER, arm, closeSharedDb, makeHarness, signalAt, type Harness } from './harness';
 
 /**
- * Delta "Scalper Offer": no closing fee when a position is closed within 30 minutes.
+ * Delta "Scalper Offer": no closing fee when a position is closed within 30 minutes. DORMANT since settings v2 (off by
+ * default, no time limit by default): these tests switch it back on with the LEGACY_SCALPER settings preset (waiver on,
+ * 30 minute time exit, $4-$6 targets) and check that the dormant code still works.
  * Everything here runs against the LOCAL mock exchange (which models the offer when asked to) and the demo
  * simulator. Nothing is verified against the real exchange.
  */
@@ -22,7 +24,7 @@ const nextIp = () => `10.9.${(ip >> 8) & 255}.${(ip++ & 255) || 1}`;
 async function boot(offer: boolean, opts: Parameters<typeof makeHarness>[0] = {}) {
   const ex = new MockDeltaExchange({ heartbeatMs: 100, scalperOffer: { enabled: offer, windowMs: 30 * MIN } });
   await ex.start();
-  h = await makeHarness({ ex, ...opts });
+  h = await makeHarness({ ex, seedSettings: LEGACY_SCALPER, ...opts });
   h.ex.setClock(() => h.clock.t);
   return h;
 }
@@ -355,7 +357,7 @@ describe('demo: simulated Scalper Offer (g)', () => {
   const demoQuote = (ts: number, bid: number, ask = bid + 0.1) => ({ ts, bid, ask, last: (bid + ask) / 2 });
 
   it('a take-profit inside 30 min pays only the entry fee: exit fee 0, exitFeeSaved > 0, balance = start - entry fee + gross', async () => {
-    h = await makeHarness({ startClock: T });
+    h = await makeHarness({ startClock: T, seedSettings: LEGACY_SCALPER });
     const d = await h.rt.demo.tryEnter(signalAt(T), h.feed.getQuote()!, ctx());
     expect(d.allowed, JSON.stringify(d.reasons)).toBe(true);
     const pos = h.rt.demo.openPosition!;
@@ -375,7 +377,7 @@ describe('demo: simulated Scalper Offer (g)', () => {
   });
 
   it('a demo time exit lands at 28.5 min and is free; analytics report the fees saved', async () => {
-    h = await makeHarness({ startClock: T });
+    h = await makeHarness({ startClock: T, seedSettings: LEGACY_SCALPER });
     await h.rt.demo.tryEnter(signalAt(T), h.feed.getQuote()!, ctx());
     const pos = h.rt.demo.openPosition!;
     const start = h.rt.demo.account.startingBalanceUsd;
@@ -403,7 +405,7 @@ describe('demo: simulated Scalper Offer (g)', () => {
   });
 
   it('waiver off: the demo exit pays its full fee and the time exit waits for the configured 30 min', async () => {
-    h = await makeHarness({ startClock: T });
+    h = await makeHarness({ startClock: T, seedSettings: LEGACY_SCALPER });
     await h.rt.updateSettings({ execution: { exitFeeWaiver: { enabled: false } } }, 'a', 'admin');
     await h.rt.demo.tryEnter(signalAt(T), h.feed.getQuote()!, ctx());
     await h.rt.demo.onQuote(demoQuote(T + 29 * MIN, 3000));
@@ -505,7 +507,7 @@ describe('snapshot and API shapes (S4, i)', () => {
 
 describe('backtest assumptions (S6)', () => {
   it('states the waiver assumption, the clamped hold, entry-fee-only, and that the Diwali offer is not modelled', async () => {
-    h = await makeHarness();
+    h = await makeHarness({ seedSettings: LEGACY_SCALPER });
     const candles = await loadCandles('synthetic', 14, null, 'ETHUSD');
     const on = runBacktestJob(candles, h.rt.getSettings(), h.rt.getSpec(), { kind: 'backtest', days: 14 }, 'synthetic') as any;
     expect(on.summary.scalperOffer).toEqual({ enabled: true, windowMinutes: 30, effectiveMaxHoldMinutes: 28.5 });
@@ -522,7 +524,7 @@ describe('backtest assumptions (S6)', () => {
 
     const off = runBacktestJob(candles, h.rt.getSettings(), h.rt.getSpec(), { kind: 'backtest', days: 14, settingsPatch: { execution: { exitFeeWaiver: { enabled: false } } } }, 'synthetic') as any;
     expect(off.summary.scalperOffer).toEqual({ enabled: false, windowMinutes: 30, effectiveMaxHoldMinutes: 30 });
-    expect(off.summary.assumptions.join(' ')).toMatch(/waiver is OFF/);
+    expect(off.summary.assumptions.join(' ')).toMatch(/paid on BOTH legs/);
     expect(off.summary.costNote.exitFeeWaived).toBe(false);
     expect(off.summary.costNote.breakevenMoveUsd).toBeGreaterThan(on.summary.costNote.breakevenMoveUsd * 1.3); // entry-only vs entry + maker exit
     expect(off.summary.fullSample.feesSavedUsd).toBe(0);
