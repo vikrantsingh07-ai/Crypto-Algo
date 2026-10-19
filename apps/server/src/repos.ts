@@ -1,5 +1,6 @@
-import { SettingsSchema, defaultSettings, type ClosedTrade, type DemoAccountState, type OpenPosition, type Settings, type TradingMode } from '@cryptoalgo/core';
+import { SETTINGS_VERSION, SettingsSchema, defaultSettings, migrateSettings, type ClosedTrade, type DemoAccountState, type OpenPosition, type Settings, type TradingMode } from '@cryptoalgo/core';
 import type { Db, Queryable } from './db/db';
+import { diffPaths } from './diffPaths';
 
 /** Persistent state held in the database. */
 
@@ -165,7 +166,27 @@ export function tradeRowToClosed(t: TradeRow): ClosedTrade {
   };
 }
 
+/** What `loadSettingsMigrating` did to a stored settings document (null when nothing had to change). */
+export interface SettingsMigration {
+  from: number;
+  to: number;
+  /** Dotted paths the migration touched. */
+  changed: string[];
+}
+
+/** Version of a stored settings document; a document without a numeric version predates versioning (= 1). */
+export function storedSettingsVersion(raw: unknown): number {
+  const v = (raw as { version?: unknown } | null)?.version;
+  return typeof v === 'number' && Number.isFinite(v) ? v : 1;
+}
+
 export class Repos {
+  /**
+   * Bumped by every trade write made through this instance. Read-side caches use it to drop a cached answer at once
+   * when this process closes or opens a trade; writes by another process are covered by the cache TTL.
+   */
+  tradeWrites = 0;
+
   constructor(public readonly db: Db) {}
 
   // ---------- singleton documents ----------
@@ -184,10 +205,44 @@ export class Repos {
 
   // ---------- settings ----------
   async loadSettings(): Promise<Settings> {
+    return (await this.loadSettingsMigrating()).settings;
+  }
+
+  /**
+   * Load the settings, upgrading an older stored document first (`migrateSettings`). The upgraded document is written
+   * back ONCE (compare-and-set on the stored version, so two instances starting together cannot both do it) and one
+   * `settings_migrated` audit row says from/to version and which keys changed. A document that is already current is
+   * not touched, so a second start changes nothing. A fresh database has no document and gets the schema defaults.
+   */
+  async loadSettingsMigrating(): Promise<{ settings: Settings; migration: SettingsMigration | null }> {
     const raw = await this.getDoc<unknown>('settings');
-    if (!raw) return defaultSettings();
-    const parsed = SettingsSchema.safeParse(raw);
-    return parsed.success ? parsed.data : defaultSettings();
+    if (!raw) return { settings: defaultSettings(), migration: null };
+    const from = storedSettingsVersion(raw);
+    if (from >= SETTINGS_VERSION) {
+      const parsed = SettingsSchema.safeParse(raw);
+      return { settings: parsed.success ? parsed.data : defaultSettings(), migration: null };
+    }
+    const migrated = migrateSettings(raw);
+    const parsed = SettingsSchema.safeParse(migrated);
+    if (!parsed.success) {
+      // Same fallback as before versioning existed (defaults), but the stored document is left exactly as it was.
+      await this.audit({ actor: 'system', action: 'settings_migration_failed', success: false, details: { from, to: SETTINGS_VERSION, issues: parsed.error.issues.slice(0, 5).map((i) => ({ path: i.path.join('.'), message: i.message })) } }).catch(() => {});
+      return { settings: defaultSettings(), migration: null };
+    }
+    const written = await this.db.query(
+      `UPDATE app_state SET value = $2::jsonb, updated_at = now()
+       WHERE key = 'settings' AND (CASE WHEN jsonb_typeof(value->'version') = 'number' THEN (value->>'version')::numeric ELSE 1 END) < $1
+       RETURNING key`,
+      [SETTINGS_VERSION, JSON.stringify(parsed.data)],
+    );
+    if (written.length === 0) {
+      // another instance migrated between our read and our write: use what it stored
+      const again = SettingsSchema.safeParse(await this.getDoc<unknown>('settings'));
+      return { settings: again.success ? again.data : parsed.data, migration: null };
+    }
+    const migration: SettingsMigration = { from, to: SETTINGS_VERSION, changed: diffPaths(raw, migrated) };
+    await this.audit({ actor: 'system', action: 'settings_migrated', details: migration });
+    return { settings: parsed.data, migration };
   }
 
   async saveSettings(s: Settings): Promise<void> {
@@ -214,6 +269,7 @@ export class Repos {
 
   // ---------- trades ----------
   async upsertTrade(t: Partial<TradeRow> & Pick<TradeRow, 'id' | 'mode' | 'status' | 'side' | 'contracts' | 'qtyEth' | 'leverage' | 'entryTs'>, q: Queryable = this.db): Promise<void> {
+    this.tradeWrites++;
     await q.query(
       `INSERT INTO trades (id, mode, status, side, contracts, qty_eth, leverage, entry_ts, exit_ts, entry_price, exit_price, exit_reason,
          stop_price, target_price, gross_pnl, entry_fee, exit_fee, fees, slippage_cost, funding, net_pnl, net_pnl_inr, hold_ms, mfe, mae,
@@ -233,6 +289,7 @@ export class Repos {
         t.reachedTarget ?? null, t.regime ?? null, JSON.stringify(t.reasons ?? []), JSON.stringify(t.meta ?? {}), t.exitFeeSaved ?? null,
       ],
     );
+    this.tradeWrites++; // again after the write: a reader that cached in between is dropped as well
   }
 
   async saveClosedTrade(c: ClosedTrade, meta: Record<string, unknown> = {}, q: Queryable = this.db): Promise<void> {

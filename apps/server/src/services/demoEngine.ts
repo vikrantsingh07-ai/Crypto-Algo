@@ -28,6 +28,10 @@ import {
 } from '@cryptoalgo/core';
 import type { Logger } from '@cryptoalgo/delta';
 import type { Repos } from '../repos';
+import { summariseToday, type DayTrade } from './today';
+
+/** How far back closed trades are kept in memory for the daily summary (covers any IST day boundary). */
+const RECENT_KEEP_MS = 72 * 3_600_000;
 
 /**
  * DEMO (paper) engine. Uses real market quotes but SIMULATED orders, fills, fees and balances.
@@ -70,6 +74,8 @@ export class DemoEngine {
   lastDecision: DemoDecision | null = null;
   private entries: number[] = [];
   private closed24h: { ts: number; netPnl: number }[] = [];
+  /** Closed trades of the CURRENT epoch from the last 72 h, for `summary().today`: no database read per dashboard poll. */
+  private recentClosed: DayTrade[] = [];
   private consecutiveLosses = 0;
   private lastLossTs: number | null = null;
   private lastEntrySignalCandle: number | null = null;
@@ -100,6 +106,7 @@ export class DemoEngine {
     this.entries = await this.d.repos.entryTimestamps('demo', since);
     const closed = await this.d.repos.closedTrades('demo', this.account.epochStart);
     this.closed24h = closed.filter((t) => t.exitTs > now - 24 * 3_600_000).map((t) => ({ ts: t.exitTs, netPnl: t.netPnl }));
+    this.recentClosed = closed.filter((t) => t.exitTs > now - RECENT_KEEP_MS).map(toDayTrade);
     this.consecutiveLosses = 0;
     this.lastLossTs = null;
     for (let i = closed.length - 1; i >= 0; i--) {
@@ -226,6 +233,9 @@ export class DemoEngine {
     const trade = closePosition(pos, { reason, price, role }, ts, this.ctx());
     this.account = applyClose(this.account, trade, ts);
     this.closed24h.push({ ts: trade.exitTs, netPnl: trade.netPnl });
+    this.recentClosed.push(toDayTrade(trade));
+    const keepFrom = ts - RECENT_KEEP_MS;
+    if (this.recentClosed.length > 200) this.recentClosed = this.recentClosed.filter((t) => t.exitTs > keepFrom);
     if (trade.netPnl < 0) {
       this.consecutiveLosses++;
       this.lastLossTs = trade.exitTs;
@@ -254,6 +264,7 @@ export class DemoEngine {
       this.account = { ...newDemoAccount(startingBalanceUsd ?? s.demo.startingBalanceUsd, now), epochStart: now + 1 };
       this.entries = [];
       this.closed24h = [];
+      this.recentClosed = [];
       this.consecutiveLosses = 0;
       this.lastLossTs = null;
       this.lastEntrySignalCandle = null;
@@ -277,6 +288,10 @@ export class DemoEngine {
       openPosition: this.account.openPosition,
       usdInrRate: s.execution.usdInrRate,
       lastDecision: this.lastDecision,
+      /** Today's results (IST day) of the current simulated account; the goal is shown as a goal, never as a promise. */
+      today: summariseToday(this.recentClosed, this.d.now(), s.goals.dailyProfitInr, s.limits.maxTradesPer24h),
     };
   }
 }
+
+const toDayTrade = (t: ClosedTrade): DayTrade => ({ exitTs: t.exitTs, netPnl: t.netPnl, netPnlInr: t.netPnlInr, fees: t.fees });

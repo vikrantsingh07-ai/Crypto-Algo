@@ -11,6 +11,22 @@ export function settings(patch: Record<string, unknown> = {}): Settings {
 }
 
 /**
+ * The pre-v2 configuration, spelled out: the dormant Scalper Offer waiver ON, a 30 minute time limit with the
+ * break-even policy, a $4-$6 target and a $3-$6 stop. The defaults no longer look like this, so the tests that cover
+ * the dormant waiver (and a configured time limit) opt in explicitly through this helper.
+ */
+export function legacySettings(patch: Record<string, unknown> = {}): Settings {
+  return deepMerge(
+    settings({
+      execution: { exitFeeWaiver: { enabled: true } },
+      exits: { maxHoldMinutes: 30, timeExitPolicy: 'breakeven_then_close' },
+      targets: { targetMoveMinUsd: 4, targetMoveMaxUsd: 6, stopLossMinUsd: 3, stopLossMaxUsd: 6 },
+    }),
+    patch,
+  );
+}
+
+/**
  * Deterministic staircase: `n` candles drifting by `step` per bar with a tiny alternating wiggle,
  * followed by one strong breakout candle in the same direction.
  */

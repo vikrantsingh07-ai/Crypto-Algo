@@ -3,13 +3,14 @@ import {
   computeMetrics,
   deepMerge,
   drawdownSeries,
-  effectiveMaxHoldMs,
   estimateEconomics,
   feeConfigFrom,
   generateSyntheticCandles,
+  roundTripFee,
   runBacktest,
   splitBars,
   walkForward,
+  waiverGuaranteed,
   warmupBars,
   type Candle,
   type ClosedTrade,
@@ -20,6 +21,7 @@ import {
 import type { DeltaClient, Logger } from '@cryptoalgo/delta';
 import { randomId } from '../crypto';
 import type { Repos } from '../repos';
+import { maxHoldMinutesOrNull } from './holdLimit';
 
 export type DataSource = 'delta' | 'synthetic';
 
@@ -68,22 +70,31 @@ export function runBacktestJob(candles: Candle[], settingsIn: Settings, spec: Co
 
   const refPrice = candles[candles.length - 1].c;
   const contracts = Math.round(settings.position.quantityEth / spec.contractValue);
-  const fees = feeConfigFrom(settings, spec);
+  // The closing fee is only assumed free when the dormant Scalper Offer is on AND a time limit keeps every exit inside its window.
+  const fees = feeConfigFrom(settings, spec, { waiverOverride: waiverGuaranteed(settings) });
   const economics = estimateEconomics(
     { side: 'long', entryPrice: refPrice, targetPrice: refPrice + settings.targets.targetMoveMinUsd, stopPrice: refPrice - settings.targets.stopLossMinUsd, contracts, contractValue: spec.contractValue, targetRole: settings.exits.takeProfitOrderType === 'limit' ? 'maker' : 'taker' },
     fees,
   );
+  const trip = roundTripFee({ price: refPrice, contracts, contractValue: spec.contractValue, cfg: fees });
   const waiver = settings.execution.exitFeeWaiver;
-  const scalperOffer = { enabled: waiver.enabled, windowMinutes: waiver.withinMinutes, effectiveMaxHoldMinutes: effectiveMaxHoldMs(settings, waiver.enabled) / 60_000 };
+  const holdLimit = maxHoldMinutesOrNull(settings, waiver.enabled);
+  const scalperOffer = { enabled: waiver.enabled, windowMinutes: waiver.withinMinutes, effectiveMaxHoldMinutes: holdLimit };
   const diwali = 'The separate "Diwali Scalper Offer" (opening fee returned as a voucher, BTCUSD only) does not apply to this ETHUSD bot and is not modelled.';
+  const holdNote =
+    holdLimit === null
+      ? 'There is no time limit: a trade ends at its target or its stop-loss (a trade still open when the data ends is closed at the last price). Funding payments are not modelled in a backtest, so the funding a long hold would pay or earn is not included.'
+      : `A trade still open after ${holdLimit.toFixed(1)} minutes is closed at the market price.`;
   const waiverNote = waiver.enabled
-    ? `Scalper Offer ASSUMED (operator-supplied terms, not verifiable through the API): an exit within ${waiver.withinMinutes} minutes of the entry pays no closing fee, so only the entry fee is paid. ${waiver.clampTimeExit ? `The time exit is clamped to ${scalperOffer.effectiveMaxHoldMinutes.toFixed(1)} min (window minus ${waiver.safetyMarginSeconds}s safety margin) so it is fee-free too` : `The time exit is NOT clamped (${scalperOffer.effectiveMaxHoldMinutes.toFixed(1)} min): an exit after the window pays the full closing fee, and so does any liquidation`}; an exit later than the window pays the full closing fee. The offer must be joined in the Delta account (liquidations are not eligible). ${diwali}`
-    : `Scalper Offer waiver is OFF: every exit pays its full maker/taker fee plus GST, and the time exit fires at ${scalperOffer.effectiveMaxHoldMinutes.toFixed(1)} min. ${diwali}`;
+    ? `Scalper Offer ASSUMED (operator-supplied terms, not verifiable through the API): an exit within ${waiver.withinMinutes} minutes of the entry pays no closing fee, so only the entry fee is paid. ${holdLimit === null ? 'No time limit is set, so a trade can outlive the window; those exits pay the full closing fee.' : waiver.clampTimeExit ? `The time exit is clamped to ${holdLimit.toFixed(1)} min (window minus ${waiver.safetyMarginSeconds}s safety margin) so it is fee-free too.` : `The time exit is NOT clamped (${holdLimit.toFixed(1)} min): an exit after the window pays the full closing fee, and so does any liquidation.`} An exit later than the window pays the full closing fee. The offer must be joined in the Delta account (liquidations are not eligible). ${diwali}`
+    : `Brokerage is paid on BOTH legs: every entry and every exit pays its maker/taker fee plus GST. ${holdNote}`;
   const costNote = {
     referencePrice: refPrice,
     entryFeeUsd: economics.entryFee,
     exitFeeWaived: economics.exitFeeWaived,
     breakevenMoveUsd: economics.breakevenMoveUsd,
+    /** Taker entry + taker exit at the reference price, nothing waived. */
+    roundTripFeeUsd: trip.total,
     roundTripFeeIfTargetUsd: economics.feeIfTarget,
     roundTripFeeIfStopUsd: economics.feeIfStop,
     netRewardAtMinTargetUsd: economics.rewardNet,

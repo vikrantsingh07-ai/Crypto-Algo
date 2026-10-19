@@ -1,10 +1,18 @@
 import { z } from 'zod';
 import type { ContractSpec } from './types';
+import { feeConfigFrom, roundTripFee } from './fees';
 
 /**
- * Persistent bot configuration. Defaults reproduce the requested initial setup:
- * ETH perpetual, 0.20 ETH, 50x, $4-$6 target, 30 minute max hold, max 10 trades / 24h.
+ * Persistent bot configuration. Defaults reproduce the requested setup:
+ * ETH perpetual, 0.20 ETH, 50x, a fixed $10 target move, a $5-$8 protective stop, NO time limit on a position,
+ * at most 10 new trades per rolling 24h (a ceiling, never a quota).
+ *
+ * Stored documents carry a `version`. Anything stored before version 2 must go through `migrateSettings` before it
+ * is parsed (the schema deliberately does not migrate by itself: a partial document must never be rewritten).
  */
+
+/** Bump when a default changes in a way that existing stored settings must be upgraded. */
+export const SETTINGS_VERSION = 2;
 
 const num = (def: number, min: number, max: number) => z.number().min(min).max(max).default(def);
 
@@ -32,6 +40,9 @@ export const StrategyParamsSchema = z.object({
 });
 
 export const SettingsSchema = z.object({
+  /** Schema version of the stored document (see `migrateSettings`). A missing version means a pre-v2 document. */
+  version: z.number().int().min(1).default(SETTINGS_VERSION),
+
   instrument: z
     .object({
       symbol: z
@@ -51,28 +62,42 @@ export const SettingsSchema = z.object({
 
   targets: z
     .object({
-      targetMoveMinUsd: num(4, 0.1, 500),
-      targetMoveMaxUsd: num(6, 0.1, 500),
+      /** Min = max = 10 means a fixed $10 move per ETH on every trade, long or short. */
+      targetMoveMinUsd: num(10, 0.1, 500),
+      targetMoveMaxUsd: num(10, 0.1, 500),
       /** Target move = clamp(ATR * mult, min, max). */
       targetAtrMultiple: num(3, 0.1, 50),
-      stopLossMinUsd: num(3, 0.1, 500),
-      stopLossMaxUsd: num(6, 0.1, 500),
+      stopLossMinUsd: num(5, 0.1, 500),
+      stopLossMaxUsd: num(8, 0.1, 500),
       stopLossAtrMultiple: num(2.5, 0.1, 50),
     })
     .prefault({}),
 
   exits: z
     .object({
-      maxHoldMinutes: z.number().min(1).max(240).default(30),
       /**
-       * What to do with a trade that has not reached its target before maxHoldMinutes:
-       * - close_at_market: close at the time limit (default, always applies as the hard backstop)
-       * - breakeven_then_close: after `breakevenAfterMinutes`, tighten the stop to break-even
-       *   (net of fees) if the trade is in profit; still hard-close at the time limit.
+       * Longest a position may stay open, in minutes. null (default) = NO time limit: the position stays open until
+       * its target or its protective stop is hit (or the operator / kill switch closes it).
        */
-      timeExitPolicy: z.enum(['close_at_market', 'breakeven_then_close']).default('breakeven_then_close'),
-      breakevenAfterMinutes: z.number().min(1).max(240).default(15),
+      maxHoldMinutes: z.number().min(1).max(1440).nullable().default(null),
+      /**
+       * What to do with a trade that has not reached its target:
+       * - none (default): no time exit and no break-even tightening; the target or the stop ends the trade. A set
+       *   `maxHoldMinutes` is ignored under this policy.
+       * - close_at_market: market-close at `maxHoldMinutes` (needs a time limit to do anything)
+       * - breakeven_then_close: after `breakevenAfterMinutes`, tighten the stop to break-even (net of fees) if the
+       *   trade is in profit; also hard-close at `maxHoldMinutes` when one is set.
+       */
+      timeExitPolicy: z.enum(['none', 'close_at_market', 'breakeven_then_close']).default('none'),
+      breakevenAfterMinutes: z.number().min(1).max(1440).default(15),
       takeProfitOrderType: z.enum(['limit', 'market']).default('limit'),
+    })
+    .prefault({}),
+
+  /** Display only: shown to the user as a goal. Nothing in the bot reads it to size, force or relax a trade. */
+  goals: z
+    .object({
+      dailyProfitInr: num(500, 0, 1_000_000),
     })
     .prefault({}),
 
@@ -124,19 +149,17 @@ export const SettingsSchema = z.object({
        */
       otherTaxRate: z.number().min(0).max(0.05).default(0),
       /**
-       * Delta "Scalper Offer": a position closed within 30 minutes of opening (ETHUSD / BTCUSD futures) pays NO
-       * closing fee - only the opening fee. Terms as published by Delta and supplied by the operator: the account
-       * must have joined the offer (trades before joining are not eligible), liquidations are not eligible, and
-       * Delta may change or end the offer at any time. The offer is not visible through the public API, so:
-       *  - Demo / backtests / pre-trade economics assume the waiver while `enabled`;
-       *  - Live P&L always uses the fees the exchange actually charged, and the first eligible live closes are
-       *    checked against the assumption (see `live.scalper` in the dashboard state). If the exchange charged a
-       *    closing fee on an eligible trade the bot falls back to no-waiver economics automatically.
-       * Turn this off if your Delta account has not joined the offer.
+       * DORMANT. Delta's "Scalper Offer" (no closing fee when a position is closed within 30 minutes) is NOT assumed:
+       * by default brokerage is paid on both legs. The block stays in the schema so the feature can be switched back on
+       * for an account that has joined the offer. When `enabled`:
+       *  - Demo / backtests / pre-trade estimates treat an exit inside the window as fee-free, but only when the time
+       *    exit guarantees it (a set `maxHoldMinutes` with a policy other than "none"); with no time limit the estimates
+       *    keep full fees, because a position may outlive the window;
+       *  - Live P&L always uses the fees the exchange actually charged.
        */
       exitFeeWaiver: z
         .object({
-          enabled: z.boolean().default(true),
+          enabled: z.boolean().default(false),
           /** Close-within window of the offer. */
           withinMinutes: z.number().min(1).max(1440).default(30),
           /**
@@ -196,16 +219,57 @@ export function defaultSettings(): Settings {
 }
 
 /**
- * The longest a position may be held before the bot market-closes it.
- * With the Scalper Offer waiver assumed this is clamped to (window - safety margin), so that even the
- * time exit is a free exit; otherwise it is simply `exits.maxHoldMinutes`.
+ * The longest a position may be held before the bot market-closes it, in ms. `Infinity` means NO time limit, which is
+ * the default: `exits.maxHoldMinutes` is null, or the policy is "none" (no time exit at all).
+ * Only an existing limit is ever shortened: while the dormant Scalper Offer waiver is assumed it is clamped to
+ * (window - safety margin) so that even the time exit is a free exit. The clamp never invents a limit by itself.
+ * JSON snapshots must send `effectiveMaxHoldMinutes` (null) instead of Infinity.
  */
 export function effectiveMaxHoldMs(settings: Settings, waiverOn: boolean = settings.execution.exitFeeWaiver.enabled): number {
-  const hold = settings.exits.maxHoldMinutes * 60_000;
+  const minutes = settings.exits.maxHoldMinutes;
+  if (minutes === null || settings.exits.timeExitPolicy === 'none') return Infinity;
+  const hold = minutes * 60_000;
   const w = settings.execution.exitFeeWaiver;
   if (!waiverOn || !w.clampTimeExit) return hold;
   const limit = w.withinMinutes * 60_000 - w.safetyMarginSeconds * 1000;
   return Math.max(60_000, Math.min(hold, limit));
+}
+
+/** `effectiveMaxHoldMs` in minutes, or null when there is no time limit (JSON-safe). */
+export function effectiveMaxHoldMinutes(settings: Settings, waiverOn?: boolean): number | null {
+  const ms = effectiveMaxHoldMs(settings, waiverOn);
+  return Number.isFinite(ms) ? ms / 60_000 : null;
+}
+
+/**
+ * True when every exit of a position is guaranteed to land inside the Scalper Offer window, i.e. the waiver may be
+ * assumed in pre-trade estimates. With no time limit a position can outlive the window, so this is false.
+ */
+export function waiverGuaranteed(settings: Settings, waiverOn: boolean = settings.execution.exitFeeWaiver.enabled): boolean {
+  if (!waiverOn) return false;
+  return effectiveMaxHoldMs(settings, true) <= settings.execution.exitFeeWaiver.withinMinutes * 60_000;
+}
+
+/**
+ * Upgrade a stored settings document to the current version. Pure and idempotent: a document that already carries
+ * `version >= SETTINGS_VERSION` is returned unchanged, anything else (a missing version counts as 1) gets the v2
+ * changes and every other stored value is kept. Run it on stored documents BEFORE `SettingsSchema.parse`.
+ *
+ * v2: no time limit (maxHoldMinutes null, policy "none"), the dormant exit-fee waiver switched off, a fixed $10
+ * target with a $5-$8 stop band, and the display-only daily goal.
+ */
+export function migrateSettings(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const stored = (raw as Record<string, unknown>).version;
+  const version = typeof stored === 'number' && Number.isFinite(stored) ? stored : 1;
+  if (version >= SETTINGS_VERSION) return raw;
+  return deepMerge(raw, {
+    version: SETTINGS_VERSION,
+    exits: { maxHoldMinutes: null, timeExitPolicy: 'none' },
+    execution: { exitFeeWaiver: { enabled: false } },
+    targets: { targetMoveMinUsd: 10, targetMoveMaxUsd: 10, stopLossMinUsd: 5, stopLossMaxUsd: 8 },
+    goals: { dailyProfitInr: 500 },
+  });
 }
 
 export function deepMerge<T>(base: T, patch: unknown): T {
@@ -298,34 +362,55 @@ export function validateSettings(settings: Settings, spec: ContractSpec, ctx: Va
   if (t.targetMoveMinUsd > t.targetMoveMaxUsd) err('targets.targetMoveMinUsd', 'Minimum target must not exceed the maximum target.');
   if (t.stopLossMinUsd > t.stopLossMaxUsd) err('targets.stopLossMinUsd', 'Minimum stop must not exceed the maximum stop.');
 
-  if (settings.exits.breakevenAfterMinutes >= settings.exits.maxHoldMinutes && settings.exits.timeExitPolicy === 'breakeven_then_close') {
+  const ex = settings.exits;
+  const limited = Number.isFinite(effectiveMaxHoldMs(settings, false));
+  if (!limited) {
+    warn(
+      'exits.maxHoldMinutes',
+      'No time limit: a position stays open until its target or its stop is hit, so it may be held through funding payments (every 8 hours). Funding can add to or reduce the result.',
+    );
+    if (ex.maxHoldMinutes !== null && ex.timeExitPolicy === 'none') {
+      warn('exits.timeExitPolicy', `A maximum holding time of ${ex.maxHoldMinutes} min is set but the time-exit policy is "none", so it is ignored.`);
+    }
+  }
+  if (ex.timeExitPolicy === 'close_at_market' && ex.maxHoldMinutes === null) {
+    warn('exits.timeExitPolicy', 'The policy "close_at_market" needs a maximum holding time; without one nothing is closed by time.');
+  }
+  // Only compare the two times when both apply.
+  if (ex.timeExitPolicy === 'breakeven_then_close' && ex.maxHoldMinutes !== null && ex.breakevenAfterMinutes >= ex.maxHoldMinutes) {
     err('exits.breakevenAfterMinutes', 'Break-even time must be earlier than the maximum holding time.');
   }
-  if (settings.exits.maxHoldMinutes > 30) warn('exits.maxHoldMinutes', 'Holding longer than 30 minutes is outside the intended scalping profile.');
 
   const w = settings.execution.exitFeeWaiver;
   if (w.enabled) {
-    const effMin = effectiveMaxHoldMs(settings, true) / 60_000;
-    if (effMin < settings.exits.maxHoldMinutes) {
-      warn(
-        'exits.maxHoldMinutes',
-        `Scalper Offer waiver is assumed, so the time exit is clamped to ${effMin.toFixed(1)} min (window ${w.withinMinutes} min minus ${w.safetyMarginSeconds}s safety margin) to keep every exit fee-free.`,
-      );
-    }
-    if (!w.clampTimeExit && settings.exits.maxHoldMinutes >= w.withinMinutes) {
-      warn('execution.exitFeeWaiver.clampTimeExit', 'A time exit at or after the waiver window pays the full closing fee, but the estimates still assume it is free.');
-    }
     if (w.safetyMarginSeconds >= w.withinMinutes * 60) {
       err('execution.exitFeeWaiver.safetyMarginSeconds', 'The safety margin must be shorter than the waiver window.');
+    }
+    if (!limited) {
+      warn(
+        'execution.exitFeeWaiver.enabled',
+        `The closing-fee waiver only covers exits within ${w.withinMinutes} min, but there is no time limit: a position that runs longer pays the full closing fee, so fee estimates keep full fees.`,
+      );
+    } else {
+      const effMin = effectiveMaxHoldMs(settings, true) / 60_000;
+      if (ex.maxHoldMinutes !== null && effMin < ex.maxHoldMinutes) {
+        warn(
+          'exits.maxHoldMinutes',
+          `Scalper Offer waiver is assumed, so the time exit is clamped to ${effMin.toFixed(1)} min (window ${w.withinMinutes} min minus ${w.safetyMarginSeconds}s safety margin) to keep every exit fee-free.`,
+        );
+      }
+      if (!w.clampTimeExit && ex.maxHoldMinutes !== null && ex.maxHoldMinutes >= w.withinMinutes) {
+        warn('execution.exitFeeWaiver.clampTimeExit', 'A time exit at or after the waiver window pays the full closing fee, but the estimates still assume it is free.');
+      }
+      if (ex.timeExitPolicy === 'breakeven_then_close' && ex.breakevenAfterMinutes * 60_000 >= effectiveMaxHoldMs(settings, true)) {
+        err('exits.breakevenAfterMinutes', 'Break-even time must be earlier than the (clamped) time exit.');
+      }
     }
     if (w.withinMinutes > 30) {
       warn('execution.exitFeeWaiver.withinMinutes', 'Delta publishes a 30-minute window for BTCUSD and ETHUSD (15 minutes for other futures). A longer window makes the fee estimates too optimistic.');
     }
     if (w.safetyMarginSeconds < 20) {
       warn('execution.exitFeeWaiver.safetyMarginSeconds', 'A very small safety margin risks the exit fill landing after the 30-minute cut-off and paying the closing fee.');
-    }
-    if (settings.exits.breakevenAfterMinutes * 60_000 >= effectiveMaxHoldMs(settings, true) && settings.exits.timeExitPolicy === 'breakeven_then_close') {
-      err('exits.breakevenAfterMinutes', 'Break-even time must be earlier than the (clamped) time exit.');
     }
   }
 
@@ -335,14 +420,20 @@ export function validateSettings(settings: Settings, spec: ContractSpec, ctx: Va
 
   if (contracts !== null) {
     const qtyEth = contracts * spec.contractValue;
-    const worstStopLoss = t.stopLossMaxUsd * qtyEth;
+    // Worst case at the widest stop, as the risk manager sees it: stop distance plus the simulated entry and stop
+    // slippage on the quantity, plus (when a price is known) full taker/taker brokerage with no waiver.
+    const px = ctx.referencePrice;
+    const slip = settings.execution.simSlippageUsd + settings.execution.simStopSlippageUsd;
+    const worstGross = (t.stopLossMaxUsd + slip) * qtyEth;
+    const worstFees =
+      px && px > 0 ? roundTripFee({ price: px, contracts, contractValue: spec.contractValue, cfg: feeConfigFrom(settings, spec, { waiverOverride: false }) }).total : 0;
+    const worstStopLoss = worstGross + worstFees;
     if (worstStopLoss > settings.limits.perTradeRiskUsd) {
       warn(
         'limits.perTradeRiskUsd',
-        `A max-width stop ($${t.stopLossMaxUsd}) risks $${worstStopLoss.toFixed(2)} before fees, above the per-trade limit ($${settings.limits.perTradeRiskUsd}). Wide-stop signals will be rejected.`,
+        `A max-width stop ($${t.stopLossMaxUsd}) can lose about $${worstStopLoss.toFixed(2)} on a trade (${worstFees > 0 ? 'including slippage and brokerage on both legs' : 'including slippage, before brokerage'}), above the per-trade limit ($${settings.limits.perTradeRiskUsd}). Wide-stop signals will be rejected.`,
       );
     }
-    const px = ctx.referencePrice;
     if (px && px > 0) {
       const notional = qtyEth * px;
       const margin = notional / settings.position.leverage;

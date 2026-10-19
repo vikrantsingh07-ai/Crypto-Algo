@@ -15,9 +15,10 @@ import { round } from './math';
  * commission charged is always returned on each fill by the exchange; in LIVE mode the fill's
  * `commission` is authoritative and this module is only used for estimates.
  *
- * Delta "Scalper Offer": an exit leg of a position that was open for at most `waiver.withinMinutes`
- * pays no commission/GST/tax (the opening leg is always charged). Controlled by
- * `settings.execution.exitFeeWaiver`; in LIVE the exchange-reported fee is authoritative.
+ * Brokerage is paid on BOTH legs. Delta's "Scalper Offer" (an exit leg of a position open for at most
+ * `waiver.withinMinutes` pays no commission/GST) is dormant: it applies only when
+ * `settings.execution.exitFeeWaiver.enabled` is switched on, which is off by default. In LIVE the
+ * exchange-reported fee is authoritative.
  */
 export interface FeeConfig {
   makerRate: number;
@@ -202,8 +203,8 @@ export function estimateEconomics(i: EconomicsInput, cfg: FeeConfig): TradeEcono
   const dir = i.side === 'long' ? 1 : -1;
   const stopFillPrice = i.stopPrice - dir * (i.stopSlippageUsd ?? 0);
 
-  // Target / stop / (clamped) time exits all happen inside the offer window, so when the waiver is assumed the
-  // expected exit fee is zero: model the exit as happening at hold = 0.
+  // Only matters while the dormant waiver is enabled: the exit is then modelled as happening inside the offer window
+  // (hold = 0) unless the caller says otherwise. With the waiver off both legs are always charged.
   const exitHoldMs = i.exitHoldMs ?? 0;
   const entryFee = calcFee({ price: i.entryPrice, contracts: i.contracts, contractValue: i.contractValue, role: entryRole }, cfg).total;
   const targetExit = calcFee({ price: i.targetPrice, contracts: i.contracts, contractValue: i.contractValue, role: targetRole, isExit: true, holdMs: exitHoldMs }, cfg);
@@ -243,4 +244,94 @@ export function estimateEconomics(i: EconomicsInput, cfg: FeeConfig): TradeEcono
 export function breakevenWinRate(rewardNet: number, riskNet: number): number {
   if (rewardNet <= 0) return 1;
   return riskNet / (riskNet + rewardNet);
+}
+
+export interface RoundTripFeeInput {
+  /** Price both legs are evaluated at (the exit price differs from the entry by a few dollars, which moves the fee by cents). */
+  price: number;
+  contracts: number;
+  contractValue: number;
+  cfg: FeeConfig;
+  /** Default taker (market / IOC entry). */
+  entryRole?: Role;
+  /** Default taker (a stop is a triggered market order). Pass 'maker' for a resting take-profit limit. */
+  exitRole?: Role;
+}
+
+export interface RoundTripFee {
+  /** Entry-leg brokerage including GST (and any configured extra tax), USD. */
+  entry: number;
+  /** Exit-leg brokerage including GST, USD. */
+  exit: number;
+  total: number;
+  /** One leg's notional at `price`, USD. */
+  notional: number;
+}
+
+/**
+ * Brokerage for one full round trip (entry + exit). Both legs are charged: the exit-fee waiver is never applied here,
+ * so this is the figure to show as "fees" in a plain-language summary. At ETH 3,390 and 0.20 ETH taker/taker it is
+ * about 0.80 USD including 18% GST; the number follows the fee rates in `cfg`, nothing is hard-coded.
+ */
+export function roundTripFee(i: RoundTripFeeInput): RoundTripFee {
+  const leg = (role: Role) => calcFee({ price: i.price, contracts: i.contracts, contractValue: i.contractValue, role }, i.cfg);
+  const entry = leg(i.entryRole ?? 'taker');
+  const exit = leg(i.exitRole ?? 'taker');
+  return {
+    entry: entry.total,
+    exit: exit.total,
+    total: round(entry.total + exit.total, 8),
+    notional: entry.notional,
+  };
+}
+
+export interface DailyOutlookInput {
+  /** Number of trades in the scenario. */
+  trades: number;
+  /** Fraction of those trades that win, 0..1. */
+  winRate: number;
+  /** Net gain of a winning trade after fees, USD (positive). */
+  winNetUsd: number;
+  /** Net loss of a losing trade after fees, USD, as a positive magnitude. */
+  lossNetUsd: number;
+  usdInrRate: number;
+}
+
+export interface DailyOutlook {
+  expectedNetUsd: number;
+  expectedNetInr: number;
+}
+
+/**
+ * What a day of `trades` trades would net under an ASSUMED win rate. This is arithmetic on the inputs, not a forecast:
+ * the win rate is whatever the caller supplies and nothing here says it can be reached.
+ */
+export function dailyOutlook(i: DailyOutlookInput): DailyOutlook {
+  const trades = Math.max(0, i.trades);
+  const p = Math.min(1, Math.max(0, i.winRate));
+  const perTrade = p * Math.abs(i.winNetUsd) - (1 - p) * Math.abs(i.lossNetUsd);
+  const usd = trades * perTrade;
+  return { expectedNetUsd: round(usd, 6), expectedNetInr: round(usd * i.usdInrRate, 2) };
+}
+
+export interface RequiredWinRateInput {
+  /** Net gain of a winning trade after fees, USD (positive). */
+  winNetUsd: number;
+  /** Net loss of a losing trade after fees, USD, as a positive magnitude. */
+  lossNetUsd: number;
+  /** Average net result wanted per trade, USD. Omit for the break-even win rate (0). */
+  targetNetPerTradeUsd?: number;
+}
+
+/**
+ * Win rate at which the average trade nets `targetNetPerTradeUsd`:  p * win - (1 - p) * loss = target
+ * =>  p = (target + loss) / (win + loss). Omitting the target gives the break-even rate. A result above 1 means the
+ * target cannot be reached at any win rate with these win and loss sizes; it is returned as is, not clamped.
+ */
+export function requiredWinRate(i: RequiredWinRateInput): number {
+  const win = Math.abs(i.winNetUsd);
+  const loss = Math.abs(i.lossNetUsd);
+  const target = i.targetNetPerTradeUsd ?? 0;
+  if (win + loss <= 0) return Infinity;
+  return Math.max(0, (target + loss) / (win + loss));
 }

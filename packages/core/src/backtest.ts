@@ -27,6 +27,8 @@ import { computeMetrics, type PerformanceMetrics } from './metrics';
  *  - Signals use only CLOSED candles; entry executes at the NEXT candle's open (+ spread/slippage).
  *  - A configurable synthetic spread is applied around candle prices (historical OHLCV has no book).
  *  - Within a candle, if stop and target are both inside the range the stop is assumed to hit first.
+ *  - Positions have no time limit by default; one still open when the data ends is closed at the last price and
+ *    flagged ('end_of_data', `endOfDataTrades`).
  *  - Fees, GST, slippage and funding come from the shared fee engine.
  *  - The same risk limits (max 10 trades/24h, daily loss, drawdown, consecutive loss, cooldown,
  *    net reward:risk, liquidation buffer...) are enforced.
@@ -55,6 +57,11 @@ export interface BacktestResult {
   metrics: PerformanceMetrics;
   signals: number;
   rejected: RejectionCounts;
+  /**
+   * Positions still open when the data ran out (0 or 1). They are closed at the last price with exit reason
+   * 'end_of_data' and stay in `trades`; treat their P&L as unfinished, not as a real exit decision.
+   */
+  endOfDataTrades: number;
   candles: number;
   from: number;
   to: number;
@@ -152,7 +159,9 @@ export function runBacktest(candles: Candle[], opts: BacktestOptions): BacktestR
     lastEntrySignalCandle = ev.signal.candleTime;
   }
 
-  // Close any position still open at the end of data (mark as time exit at last close).
+  // With no time limit a position can still be open when the data ends. Close it at the last price on the
+  // executable side and flag it ('end_of_data'); it is never dropped and never reported as a real exit.
+  let endOfDataTrades = 0;
   if (account.openPosition) {
     const last = candles[end];
     const closeTs = last.t + period;
@@ -160,11 +169,12 @@ export function runBacktest(candles: Candle[], opts: BacktestOptions): BacktestR
     const pos = account.openPosition;
     const dir = pos.side === 'long' ? 1 : -1;
     const price = dir === 1 ? tick.bid : tick.ask;
-    const trade = closePosition(pos, { reason: 'time_exit', price, role: 'taker' }, closeTs, ctx);
+    const trade = closePosition(pos, { reason: 'end_of_data', price, role: 'taker' }, closeTs, ctx);
     account = applyClose(account, trade, closeTs);
     trades.push(trade);
+    endOfDataTrades++;
   }
 
   const metrics = computeMetrics(trades, settings.demo.startingBalanceUsd, settings.execution.usdInrRate);
-  return { trades, metrics, signals, rejected, candles: end - start + 1, from: candles[start]?.t ?? 0, to: candles[end]?.t ?? 0 };
+  return { trades, metrics, signals, rejected, endOfDataTrades, candles: end - start + 1, from: candles[start]?.t ?? 0, to: candles[end]?.t ?? 0 };
 }

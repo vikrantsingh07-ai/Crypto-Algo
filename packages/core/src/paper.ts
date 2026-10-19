@@ -26,12 +26,13 @@ import { round, roundToTick } from './math';
  *  - Take profit: resting reduce-only limit. Fills at the target price (maker fee) once the
  *    market trades THROUGH it (`tpFillModel = 'through'`, one tick beyond) or touches it
  *    (`'touch'`). With `takeProfitOrderType = 'market'` it fills as taker with slippage.
- *  - Time exit: market close at bid/ask with slippage; taker fee. While the Scalper Offer waiver is assumed
- *    the time exit fires `safetyMarginSeconds` before the 30-minute window ends (see `effectiveMaxHoldMs`).
- *  - Scalper Offer: any exit within the window pays no closing fee (`calcFee`, holdMs <= window); the entry
- *    fee is always charged. A close after the window (waiver off / clamp off) pays the normal closing fee.
+ *  - Time exit: only when a time limit is configured (default: none, a position stays open until its target or its
+ *    stop is hit). Market close at bid/ask with slippage; taker fee. If the dormant Scalper Offer waiver is enabled
+ *    the time exit fires `safetyMarginSeconds` before the window ends (see `effectiveMaxHoldMs`).
+ *  - Brokerage is charged on both legs. Only if the dormant Scalper Offer waiver is enabled is an exit within its
+ *    window free (`calcFee`, holdMs <= window); the entry fee is always charged.
  *  - If stop and target both trigger inside one tick/candle, the STOP is assumed to hit first.
- *  - Funding is charged when a funding timestamp is crossed while the position is open.
+ *  - Funding is charged for every funding timestamp crossed while the position is open, however many hours that is.
  */
 
 export interface Tick {
@@ -66,7 +67,7 @@ export function paperContext(settings: Settings, spec: ContractSpec, fundingRate
   return { settings, spec, fees: feeConfigFrom(settings, spec, feeOpts), fundingRate };
 }
 
-/** Time exit used by the simulator and by live: the Scalper Offer clamp applies while the waiver is assumed. */
+/** Time exit used by the simulator and by live, in ms; Infinity = no time limit. The waiver clamp only shortens an existing limit. */
 export function timeExitMs(ctx: PaperContext): number {
   return effectiveMaxHoldMs(ctx.settings, ctx.fees.waiver.enabled);
 }
@@ -181,12 +182,14 @@ export interface StepResult {
 }
 
 /**
- * Breakeven stop price that covers entry+exit fees on the current position. With the Scalper Offer waiver
- * the closing leg is free while the position is inside the window, so only the entry fee has to be recovered.
+ * Breakeven stop price that covers entry+exit fees on the current position. Only when the dormant Scalper Offer
+ * waiver is enabled AND the time exit guarantees every exit lands inside its window is the closing leg assumed free;
+ * otherwise (the default) both legs are recovered.
  */
 export function breakevenStopPrice(pos: OpenPosition, ctx: PaperContext, heldMs = 0): number {
   const dir = pos.side === 'long' ? 1 : -1;
-  const waived = ctx.fees.waiver.enabled && heldMs <= ctx.fees.waiver.withinMinutes * 60_000;
+  const windowMs = ctx.fees.waiver.withinMinutes * 60_000;
+  const waived = ctx.fees.waiver.enabled && heldMs <= windowMs && timeExitMs(ctx) <= windowMs;
   const exitRate = waived ? 0 : ctx.fees.takerRate * (1 + ctx.fees.gstRate) + (ctx.fees.otherTaxRate ?? 0);
   const qty = pos.qtyEth;
   const move = (pos.entryFee.total + exitRate * qty * pos.entryPrice) / (qty * (1 - dir * exitRate));
@@ -246,7 +249,7 @@ export function stepPosition(prev: OpenPosition, tick: Tick, ctx: PaperContext):
     return { position: pos, exit: { reason: 'take_profit', price, role: 'taker' }, fundingDelta };
   }
 
-  // 4) Break-even tightening for trades that have not reached the target yet.
+  // 4) Break-even tightening for trades that have not reached the target yet (only for this policy).
   if (
     s.exits.timeExitPolicy === 'breakeven_then_close' &&
     !pos.breakevenArmed &&
@@ -262,7 +265,7 @@ export function stepPosition(prev: OpenPosition, tick: Tick, ctx: PaperContext):
     }
   }
 
-  // 5) Time exit (hard backstop): close at market.
+  // 5) Time exit (hard backstop): close at market. Never fires without a time limit (timeExitMs is Infinity).
   if (heldMs >= timeExitMs(ctx)) {
     const ref = dir === 1 ? tick.bid : tick.ask;
     const price = roundToTick(ref - dir * slip, spec.tickSize, dir === 1 ? 'down' : 'up');

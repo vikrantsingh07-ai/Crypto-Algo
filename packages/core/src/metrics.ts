@@ -40,11 +40,13 @@ export interface PerformanceMetrics {
   takeProfitPct: number;
   stopLossPct: number;
   timeExitPct: number;
+  /** Share of trades force-closed because a backtest ran out of data while they were open (not a real exit). */
+  endOfDataPct: number;
   breakevenStopPct: number;
   exitReasons: Record<string, number>;
   /** Win rate needed to break even given the realised average win / loss sizes. */
   breakevenWinRate: number | null;
-  /** Closing fees the Scalper Offer waived across these trades (USD). */
+  /** Closing fees the dormant Scalper Offer waived across these trades (USD); 0 unless the waiver is enabled. */
   feesSavedUsd: number;
   byRegime: Record<string, GroupStats>;
   bySide: Record<Side, GroupStats>;
@@ -110,7 +112,8 @@ export function computeMetrics(trades: ClosedTrade[], startingBalance: number, u
     days.set(day, d);
   }
 
-  const bucketsDef: [string, number][] = [['<5m', 5], ['5-10m', 10], ['10-20m', 20], ['20-30m', 30], ['>30m', Infinity]];
+  // Positions have no time limit, so the buckets run from minutes to hours.
+  const bucketsDef: [string, number][] = [['<10m', 10], ['10-30m', 30], ['30-60m', 60], ['1-3h', 180], ['>3h', Infinity]];
   const holdingBuckets = bucketsDef.map(([label]) => ({ label, count: 0 }));
   for (const t of sorted) {
     const m = t.holdMs / 60_000;
@@ -150,6 +153,7 @@ export function computeMetrics(trades: ClosedTrade[], startingBalance: number, u
     takeProfitPct: round(pct('take_profit'), 3),
     stopLossPct: round(pct('stop_loss') + pct('liquidation'), 3),
     timeExitPct: round(pct('time_exit'), 3),
+    endOfDataPct: round(pct('end_of_data'), 3),
     breakevenStopPct: round(pct('breakeven_stop'), 3),
     exitReasons,
     breakevenWinRate: avgWin + avgLoss > 0 ? round(avgLoss / (avgWin + avgLoss), 4) : null,

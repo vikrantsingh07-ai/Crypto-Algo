@@ -1,6 +1,6 @@
 import type { ContractSpec, Quote, Side, Signal, TradingMode } from './types';
 import type { Settings } from './settings';
-import { quantityToContracts } from './settings';
+import { quantityToContracts, waiverGuaranteed } from './settings';
 import { estimateEconomics, feeConfigFrom, type FeeConfigOptions, type TradeEconomics } from './fees';
 import { roundToTick } from './math';
 
@@ -89,7 +89,7 @@ export interface RiskInput {
   state: RiskState;
   signal: Signal;
   quote: Quote;
-  /** Live passes `{ waiverOverride: false }` after the exchange was seen charging a closing fee on an eligible trade. */
+  /** Live passes `{ waiverOverride: false }` after the exchange was seen charging a closing fee on an eligible trade. Only relevant while the dormant exit-fee waiver is enabled. */
   feeOptions?: FeeConfigOptions;
 }
 
@@ -311,9 +311,15 @@ export function evaluateEntryRisk(input: RiskInput): RiskDecision {
       stopRole: 'taker' as const,
       stopSlippageUsd: settings.execution.simStopSlippageUsd,
     };
-    // Reward gates use the effective fee model (Scalper Offer assumed or observed). The per-trade LOSS CAP is a
-    // safety limit, so it is always evaluated on full fees: an assumed waiver must never make a risk ceiling looser.
-    const economics = estimateEconomics(econInput, feeConfigFrom(settings, spec, input.feeOptions));
+    // Reward gates use the effective fee model: full brokerage on both legs by default. The dormant exit-fee waiver is
+    // assumed only if enabled/observed AND the time exit guarantees every exit inside its window (never when there is
+    // no time limit). The per-trade LOSS CAP is a safety limit, so it is always evaluated on full fees: an assumed
+    // waiver must never make a risk ceiling looser.
+    const waiverRequested = input.feeOptions?.waiverOverride ?? settings.execution.exitFeeWaiver.enabled;
+    const economics = estimateEconomics(
+      econInput,
+      feeConfigFrom(settings, spec, { ...input.feeOptions, waiverOverride: waiverRequested && waiverGuaranteed(settings, true) }),
+    );
     const worstCase = estimateEconomics(econInput, feeConfigFrom(settings, spec, { ...input.feeOptions, waiverOverride: false }));
     plan = { side, contracts, qtyEth, entryPrice: entry, stopPrice, targetPrice, marginUsd, liquidationPrice: liq, liquidationDistanceUsd: liqDist, economics };
 

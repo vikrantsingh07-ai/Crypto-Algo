@@ -19,7 +19,8 @@ export const DEFAULT_GRID: { name: string; patch: ParamPatch }[] = [
   { name: 'baseline', patch: {} },
   { name: 'tight-breakout', patch: { strategy: { breakoutLookback: 8, momentumAtrMult: 1.0 } } },
   { name: 'loose-breakout', patch: { strategy: { breakoutLookback: 14, momentumAtrMult: 0.6 } } },
-  { name: 'wide-target', patch: { targets: { targetAtrMultiple: 4 } } },
+  // The target is a fixed move (min = max), so the old 'wide-target' candidate would be identical to the baseline.
+  { name: 'wide-stop', patch: { targets: { stopLossMinUsd: 7, stopLossMaxUsd: 8 } } },
 ];
 
 export interface FoldResult {

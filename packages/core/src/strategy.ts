@@ -15,8 +15,10 @@ import { atr, efficiencyRatio, ema, priorHigh, priorLow, priorMeanVolume, sma, v
  *   volume     volume >= r * mean volume of previous bars
  *   extension  close within X ATR of emaFast (do not chase)
  *   efficiency Kaufman efficiency ratio >= threshold (filters chop)
- *   atr band   minAtr <= ATR <= maxAtr (enough range for a $4-6 move, but not chaos)
- * SHORT is the mirror image. Targets/stops are ATR-scaled and clamped to the configured $ bands.
+ *   atr band   minAtr <= ATR <= maxAtr (some range to work with, but not chaos)
+ * SHORT is the mirror image. Targets/stops are ATR-scaled and clamped to the configured $ bands (default: a fixed
+ * $10 target, a $5-$8 stop). A signal is only ever the result of these conditions: the daily trade limit is a
+ * ceiling, nothing here (or anywhere) tries to reach it.
  *
  * Signals are generated on CLOSED candles only; execution happens on the next tick / next bar open.
  */

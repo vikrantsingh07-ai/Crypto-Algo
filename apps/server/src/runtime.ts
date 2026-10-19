@@ -21,6 +21,7 @@ import {
 import type { AppConfig } from './config';
 import { createDb, migrate, type Db } from './db/db';
 import { createLogger } from './logger';
+import { diffPaths } from './diffPaths';
 import { Repos } from './repos';
 import { LiveActivation } from './services/activation';
 import { BacktestService } from './services/backtestService';
@@ -61,15 +62,6 @@ export interface Runtime {
   close(): Promise<void>;
 }
 
-function diffPaths(a: unknown, b: unknown, prefix = ''): string[] {
-  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return JSON.stringify(a) === JSON.stringify(b) ? [] : [prefix];
-  const out: string[] = [];
-  for (const k of new Set([...Object.keys(a as object), ...Object.keys(b as object)])) {
-    out.push(...diffPaths((a as any)[k], (b as any)[k], prefix ? `${prefix}.${k}` : k));
-  }
-  return out;
-}
-
 export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): Promise<Runtime> {
   const logger = ov.logger ?? createLogger(cfg.LOG_LEVEL);
   const db = ov.db ?? (await createDb({ url: cfg.DATABASE_URL, ssl: cfg.DATABASE_SSL, dataDir: path.join(cfg.DATA_DIR, 'pglite') }));
@@ -92,7 +84,9 @@ export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): 
   const http = new DeltaHttp({ baseUrl: endpoints.restUrl, credentials: creds.provider, userAgent: 'cryptoalgo-bot/1.0', logger, sleep: ov.sleep });
   const client = new DeltaClient(http);
 
-  let settings = await repos.loadSettings();
+  const loaded = await repos.loadSettingsMigrating();
+  let settings = loaded.settings;
+  if (loaded.migration) logger.info('stored settings upgraded', { from: loaded.migration.from, to: loaded.migration.to, changed: loaded.migration.changed });
   let spec: ContractSpec = fallbackContractSpec(cfg.SYMBOL);
 
   const feed: MarketFeed =
@@ -151,7 +145,9 @@ export async function createRuntime(cfg: AppConfig, ov: RuntimeOverrides = {}): 
   const backtests = new BacktestService({ repos, client: cfg.MARKET_DATA_SOURCE === 'synthetic' ? null : client, source: cfg.MARKET_DATA_SOURCE, symbol: settings.instrument.symbol, getSettings, getSpec, logger });
 
   const updateSettings: Runtime['updateSettings'] = async (patch, actor, role, ip) => {
-    const merged = deepMerge(settings, patch);
+    // The schema version belongs to the server: a stale dashboard tab sending a whole old document must not downgrade it.
+    const { version: _ignored, ...clean } = (patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {}) as Record<string, unknown>;
+    const merged = deepMerge(settings, clean);
     const parsed = SettingsSchema.safeParse(merged);
     if (!parsed.success) {
       const issues: SettingsIssue[] = parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message, severity: 'error' as const }));

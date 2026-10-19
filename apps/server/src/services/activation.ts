@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import {
-  effectiveMaxHoldMs,
   estimateEconomics,
   feeConfigFrom,
   hasErrors,
   quantityToContracts,
   validateSettings,
+  waiverGuaranteed,
   type ContractSpec,
   type Settings,
 } from '@cryptoalgo/core';
@@ -14,6 +14,7 @@ import type { AppConfig } from '../config';
 import { hmacHex, safeEqual } from '../crypto';
 import type { BotState, Repos } from '../repos';
 import type { CredentialStore } from './credentials';
+import { maxHoldMinutesOrNull } from './holdLimit';
 import type { LiveExecutor } from './liveExecutor';
 
 /**
@@ -57,21 +58,25 @@ export interface ActivationSummary {
   dailyLossLimitUsd: number;
   maxTradesPer24h: number;
   maxDrawdownPct: number;
-  maxHoldMinutes: number;
+  /** null = no time limit: a position stays open until its target or its stop-loss is hit. */
+  maxHoldMinutes: number | null;
+  /** Plain-language statement of the holding rule for the review screen. */
+  holdNote: string;
   feeFractionOfTarget: number | null;
   breakevenMoveUsd: number | null;
   credentialFingerprint: string | null;
   positionPolicyOnSwitchToDemo: string;
   killSwitchAction: string;
   /**
-   * Delta Scalper Offer (no closing fee when a position is closed within the window). The economics above assume it
-   * while `assumed`; `effectiveMaxHoldMinutes` is the time exit live will use (clamped before the window ends).
+   * Delta Scalper Offer (no closing fee when a position is closed within the window): DORMANT, off by default. The
+   * economics above assume it only while `assumed` and a time limit guarantees every exit inside the window;
+   * `effectiveMaxHoldMinutes` is the time exit live will use (null = none).
    */
   scalperOffer: {
     assumed: boolean;
     windowMinutes: number;
     safetyMarginSeconds: number;
-    effectiveMaxHoldMinutes: number;
+    effectiveMaxHoldMinutes: number | null;
   };
 }
 
@@ -106,13 +111,34 @@ export interface ActivationDeps {
 
 const TOKEN_TTL_MS = 5 * 60_000;
 
-export const ACKNOWLEDGEMENTS = [
-  'I understand Live Trading places REAL orders using real funds and can lose money, including my entire deposit.',
-  'I understand 50x leverage amplifies losses, and that fees (maker/taker plus GST) consume a large part of a $4–$6 price move.',
-  'I have run this strategy in Demo mode and reviewed the results; I do not rely on backtests as a guarantee of profit.',
-  'I understand the bot can be stopped with the Emergency Kill Switch and that I am responsible for monitoring my account.',
-  'I understand the zero closing fee depends on my Delta account having joined the Scalper Offer; if it has not, closing fees apply and results will be lower than shown.',
-];
+/** The plain-language statement of the holding rule: shown in the review and acknowledged by the operator. */
+export function holdRuleText(settings: Settings): string {
+  const limit = settings.exits.timeExitPolicy === 'none' ? null : settings.exits.maxHoldMinutes;
+  return limit === null
+    ? 'There is no time limit: a position stays open until its target or its stop-loss is hit (or you close it). It can stay open for hours, through funding payments, and it is not guaranteed to reach its target. The stop-loss is always active.'
+    : `A position that has hit neither its target nor its stop-loss is closed at the market price after ${limit} minutes, which can be at a loss. The stop-loss is always active.`;
+}
+
+/** The risk acknowledgements for the CURRENT settings (the review screen shows exactly these). */
+export function acknowledgementsFor(settings: Settings): string[] {
+  const t = settings.targets;
+  const move = t.targetMoveMinUsd === t.targetMoveMaxUsd ? `$${t.targetMoveMinUsd}` : `$${t.targetMoveMinUsd}–$${t.targetMoveMaxUsd}`;
+  const limit = settings.exits.timeExitPolicy === 'none' ? null : settings.exits.maxHoldMinutes;
+  const acks = [
+    'I understand Live Trading places REAL orders using real funds and can lose money, including my entire deposit.',
+    `I understand ${settings.position.leverage}x leverage amplifies losses, and that brokerage (maker/taker fees plus GST) is paid on both the entry and the exit and takes a part of a ${move} price move.`,
+    'I have run this strategy in Demo mode and reviewed the results; I do not rely on backtests as a guarantee of profit.',
+    'I understand the bot can be stopped with the Emergency Kill Switch and that I am responsible for monitoring my account.',
+    limit === null
+      ? 'I understand a position has no time limit: it can stay open for hours and through funding payments, it ends only when its target or its stop-loss is hit (or I close it), and it is not guaranteed to reach its target.'
+      : `I understand a position that has hit neither its target nor its stop-loss is closed at the market price after ${limit} minutes, possibly at a loss.`,
+  ];
+  // The Scalper Offer is dormant (off by default): it is only mentioned when it has been switched on.
+  if (settings.execution.exitFeeWaiver.enabled) {
+    acks.push('I understand the zero closing fee depends on my Delta account having joined the Scalper Offer; if it has not, closing fees apply and results will be lower than shown.');
+  }
+  return acks;
+}
 
 export class LiveActivation {
   constructor(private readonly d: ActivationDeps) {}
@@ -142,6 +168,7 @@ export class LiveActivation {
     const cs = d.creds.status();
     add('credentials', 'API credentials configured on the server', cs.configured, cs.configured ? `Key ${cs.keyHint} (${cs.fingerprint}) from ${cs.source}.` : 'No API key/secret configured for this environment. Add them in Settings → Exchange connection.');
     this.addScalperCheck(add);
+    add('holding_rule', 'Holding rule', true, holdRuleText(settings), false);
     add('environment', 'Exchange environment', true, `${d.endpoints.label}${d.endpoints.realMoney ? ' — REAL FUNDS' : ' — sandbox, no real funds'}`, false);
 
     let spec = d.getSpec();
@@ -207,7 +234,7 @@ export class LiveActivation {
       const e = estimateEconomics(
         { side: 'long', entryPrice: price, targetPrice: price + (settings.targets.targetMoveMinUsd + settings.targets.targetMoveMaxUsd) / 2, stopPrice: price - settings.targets.stopLossMaxUsd, contracts, contractValue: spec.contractValue, targetRole: settings.exits.takeProfitOrderType === 'limit' ? 'maker' : 'taker' },
         // the same fee view live gates on: waiver assumed unless the exchange has been seen charging a closing fee
-        feeConfigFrom(settings, spec, { waiverOverride: d.executor.waiverEffective() }),
+        feeConfigFrom(settings, spec, { waiverOverride: d.executor.waiverEffective() && waiverGuaranteed(settings) }),
       );
       breakeven = e.breakevenMoveUsd;
       feeFrac = e.rewardGross > 0 ? e.feeIfTarget / e.rewardGross : null;
@@ -232,7 +259,8 @@ export class LiveActivation {
       dailyLossLimitUsd: L.dailyLossLimitUsd,
       maxTradesPer24h: L.maxTradesPer24h,
       maxDrawdownPct: L.maxDrawdownPct,
-      maxHoldMinutes: settings.exits.maxHoldMinutes,
+      maxHoldMinutes: settings.exits.timeExitPolicy === 'none' ? null : settings.exits.maxHoldMinutes,
+      holdNote: holdRuleText(settings),
       feeFractionOfTarget: feeFrac,
       breakevenMoveUsd: breakeven,
       credentialFingerprint: cs.fingerprint,
@@ -242,14 +270,14 @@ export class LiveActivation {
         assumed: settings.execution.exitFeeWaiver.enabled,
         windowMinutes: settings.execution.exitFeeWaiver.withinMinutes,
         safetyMarginSeconds: settings.execution.exitFeeWaiver.safetyMarginSeconds,
-        effectiveMaxHoldMinutes: effectiveMaxHoldMs(settings, d.executor.waiverEffective()) / 60_000,
+        effectiveMaxHoldMinutes: maxHoldMinutesOrNull(settings, d.executor.waiverEffective()),
       },
     };
 
     const ok = checks.filter((c) => c.blocker).every((c) => c.ok);
     const expiresAt = d.now() + TOKEN_TTL_MS;
     const token = ok ? this.signToken(actor, this.summaryHash(summary, settings), expiresAt) : null;
-    return { ok, checks, summary, token, expiresAt, requiredPhrase: this.requiredPhrase(), acknowledgements: ACKNOWLEDGEMENTS };
+    return { ok, checks, summary, token, expiresAt, requiredPhrase: this.requiredPhrase(), acknowledgements: acknowledgementsFor(settings) };
   }
 
   /** The waiver settings are part of what the operator reviewed: changing any of them invalidates the review token. */
@@ -263,11 +291,10 @@ export class LiveActivation {
     const w = this.d.getSettings().execution.exitFeeWaiver;
     const status = this.d.executor.waiver.status;
     const diwali = 'The separate "Diwali Scalper Offer" (opening fee returned as a voucher, BTCUSD only) does not apply to this ETHUSD bot and is not modelled.';
-    if (!w.enabled) {
-      add('scalper_offer', 'Scalper Offer (zero closing fee)', true, `Not assumed: the waiver is switched off in Settings, so all economics include the closing fee. ${diwali}`, false);
-      return;
-    }
-    const base = `Estimates assume Delta's Scalper Offer: no closing fee when a position is closed within ${w.withinMinutes} minutes (the opening fee is still paid; the time exit fires at ${(effectiveMaxHoldMs(this.d.getSettings(), this.d.executor.waiverEffective()) / 60_000).toFixed(1)} min). The offer must be joined in your Delta account (trades taken before joining are not eligible, liquidations are not eligible), it cannot be verified through the API and will be verified on the first eligible live close. ${diwali}`;
+    if (!w.enabled) return; // dormant and off: brokerage is paid on both legs and there is nothing to report
+    const limit = maxHoldMinutesOrNull(this.d.getSettings(), this.d.executor.waiverEffective());
+    const exitText = limit === null ? 'no time limit is set, so a position can outlive the window and then pays the full closing fee; estimates keep the full fee' : `the time exit fires at ${limit.toFixed(1)} min`;
+    const base = `Estimates assume Delta's Scalper Offer: no closing fee when a position is closed within ${w.withinMinutes} minutes (the opening fee is still paid; ${exitText}). The offer must be joined in your Delta account (trades taken before joining are not eligible, liquidations are not eligible), it cannot be verified through the API and will be verified on the first eligible live close. ${diwali}`;
     if (status === 'not_applied') {
       add('scalper_offer', 'Scalper Offer (zero closing fee)', false, `Delta already charged a closing fee on an eligible trade, so live is using full-fee economics. Join the offer in your Delta account and use "Reset & re-check" on the Live panel to verify again. ${base}`, false);
     } else if (status === 'confirmed') {

@@ -1,10 +1,11 @@
-import { breakevenWinRate, effectiveMaxHoldMs, estimateEconomics, evaluateLatest, feeConfigFrom, quantityToContracts, riskSummary, type ContractSpec, type Evaluation, type Quote, type Settings } from '@cryptoalgo/core';
+import { breakevenWinRate, estimateEconomics, evaluateLatest, feeConfigFrom, quantityToContracts, riskSummary, roundTripFee, waiverGuaranteed, type Candle, type ContractSpec, type Evaluation, type Quote, type Settings } from '@cryptoalgo/core';
 import type { DeltaEndpoints, DeltaHttp, Logger, MarketFeed } from '@cryptoalgo/delta';
 import type { AppConfig } from '../config';
 import { randomId } from '../crypto';
 import type { BotState, Repos } from '../repos';
 import type { CredentialStore } from './credentials';
 import type { DemoEngine } from './demoEngine';
+import { maxHoldMinutesOrNull } from './holdLimit';
 import type { LiveExecutor } from './liveExecutor';
 import { PrivateStream } from './privateStream';
 
@@ -23,6 +24,19 @@ export interface BotDeps {
   refreshSpec: () => Promise<ContractSpec>;
   now: () => number;
 }
+
+/** One 1-minute candle as the dashboard chart reads it (`t` = open time, ms since epoch). */
+export interface MarketCandleDto {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+/** How many closed 1m candles `state.market.candles` carries (3 hours). */
+export const MARKET_CANDLES = 180;
 
 export interface ModeSwitchResult {
   mode: 'demo';
@@ -51,6 +65,9 @@ export class Bot {
   private lastSpecRefresh = 0;
   private lastError: string | null = null;
   readonly privateStream: PrivateStream;
+  /** `state.market.candles` only changes when a minute closes: rebuilt then, shared by every poll in between. */
+  private marketCandlesKey = '';
+  private marketCandles: MarketCandleDto[] = [];
 
   constructor(private readonly d: BotDeps) {
     this.privateStream = new PrivateStream({
@@ -335,15 +352,17 @@ export class Bot {
   // ------------------------------------------------------------------ dashboard snapshot
   /**
    * "Fee reality check": what each target size is worth after maker/taker fees + GST at the current price.
-   * The main tables follow the DEMO fee configuration (Scalper Offer waiver while it is assumed); the `*NoWaiver`
-   * tables show the same trades with a full closing fee, which is what live falls back to if Delta turns out not to
-   * waive it. `scalper.liveEffective` says which of the two live is currently gating on.
+   * Brokerage is paid on BOTH legs. The main tables follow the DEMO fee configuration, which only waives the closing
+   * fee when the dormant Scalper Offer is switched on AND a time limit guarantees every exit inside its window (never
+   * with the default of no time limit); the `*NoWaiver` tables always carry the full closing fee.
+   * `roundTrip` is the plain figure for the user: taker entry + taker exit at the current price, nothing waived.
    */
   private economics(settings: Settings, spec: ContractSpec, quote: Quote | null) {
     const contracts = quantityToContracts(settings.position.quantityEth, spec.contractValue);
     if (!contracts || !quote) return null;
     const px = quote.last;
-    const fees = feeConfigFrom(settings, spec);
+    const waiverAssumed = waiverGuaranteed(settings);
+    const fees = feeConfigFrom(settings, spec, { waiverOverride: waiverAssumed });
     const noWaiver = feeConfigFrom(settings, spec, { waiverOverride: false });
     const waived = feeConfigFrom(settings, spec, { waiverOverride: true });
     const t = settings.targets;
@@ -355,9 +374,11 @@ export class Bot {
     };
     const be = (role: 'maker' | 'taker', cfg = fees) => estimateEconomics({ side: 'long', entryPrice: px, targetPrice: px + 5, stopPrice: px - stop, contracts, contractValue: spec.contractValue, targetRole: role }, cfg).breakevenMoveUsd;
     const w = settings.execution.exitFeeWaiver;
+    const trip = roundTripFee({ price: px, contracts, contractValue: spec.contractValue, cfg: fees });
     return {
       referencePrice: px,
       contracts,
+      roundTrip: { priceUsd: px, qtyEth: contracts * spec.contractValue, notionalUsd: trip.notional, entryFeeUsd: trip.entry, exitFeeUsd: trip.exit, totalFeeUsd: trip.total },
       stopUsd: stop,
       makerTarget: moves.map((m) => row(m, 'maker')),
       takerTarget: moves.map((m) => row(m, 'taker')),
@@ -367,17 +388,45 @@ export class Bot {
       verifiedSpec: spec.verified,
       scalper: {
         assumed: w.enabled,
-        effective: w.enabled,
+        effective: waiverAssumed,
         liveEffective: this.d.live.waiverEffective(),
         windowMinutes: w.withinMinutes,
         safetyMarginSeconds: w.safetyMarginSeconds,
-        effectiveMaxHoldMinutes: effectiveMaxHoldMs(settings, w.enabled) / 60_000,
+        /** null = no time limit */
+        effectiveMaxHoldMinutes: maxHoldMinutesOrNull(settings, w.enabled),
       },
       makerTargetNoWaiver: moves.map((m) => row(m, 'maker', noWaiver)),
       takerTargetNoWaiver: moves.map((m) => row(m, 'taker', noWaiver)),
       breakevenMoveNoWaiverMakerExitUsd: be('maker', noWaiver),
       breakevenMoveWaivedUsd: be('taker', waived),
     };
+  }
+
+  /**
+   * Chart data for the dashboard: the last 180 closed 1m candles (oldest first), the forming one and the current quote.
+   * The browser normally reads Delta's public WebSocket itself; this is its seed and its fallback.
+   */
+  private market(quote: Quote | null) {
+    const feed = this.d.feed;
+    const closed: Candle[] = feed.getClosedCandles();
+    const tail = closed[closed.length - 1];
+    const key = `${closed.length}|${tail?.t ?? 0}|${tail?.c ?? 0}`;
+    if (key !== this.marketCandlesKey) {
+      this.marketCandles = closed.slice(-MARKET_CANDLES).map((c) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v }));
+      this.marketCandlesKey = key;
+    }
+    const f = feed.getFormingCandle();
+    let forming: MarketCandleDto | undefined;
+    if (f) {
+      forming = { t: f.t, o: f.o, h: f.h, l: f.l, c: f.c, v: f.v };
+      // The candle stream updates about once a second, the quote is newer: let the last bar follow the price.
+      if (quote && quote.last > 0 && Math.floor(quote.ts / 60_000) * 60_000 === f.t) {
+        forming.c = quote.last;
+        forming.h = Math.max(forming.h, quote.last);
+        forming.l = Math.min(forming.l, quote.last);
+      }
+    }
+    return { quote, candles: this.marketCandles, forming };
   }
 
   snapshot() {
@@ -428,6 +477,7 @@ export class Bot {
         privateStream: this.privateStream.status(),
       },
       economics: this.economics(settings, spec, quote),
+      market: this.market(quote),
       spark: [...d.feed.getClosedCandles().slice(-90).map((c) => [c.t, c.c]), ...(d.feed.getFormingCandle() ? [[d.feed.getFormingCandle()!.t, d.feed.getFormingCandle()!.c]] : [])],
       settings,
     };

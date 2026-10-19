@@ -65,6 +65,48 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
   const admin = { preHandler: requireRole('admin') };
   const strict = (max: number) => ({ config: { rateLimit: { max, timeWindow: '1 minute' } } });
 
+  // Read endpoints are polled by the dashboard every 1-2 s per open tab (state + trades + the other panels), and the
+  // Vercel proxy forwards the real client IP, so one phone and one laptop behind the same router share an IP. They are
+  // therefore limited per SIGNED-IN USER (a valid session token is verified here, no database involved) with plenty of
+  // headroom, while anonymous or invalid-token callers stay on a small per-IP limit. Login and every state-changing route
+  // keep their strict limits above and below.
+  const READ_PER_USER_PER_MIN = 3000;
+  const READ_ANON_PER_MIN = 120;
+  const readLimit = {
+    config: {
+      rateLimit: {
+        timeWindow: '1 minute',
+        max: (_req: FastifyRequest, key: string) => (key.startsWith('u:') ? READ_PER_USER_PER_MIN : READ_ANON_PER_MIN),
+        keyGenerator: async (req: FastifyRequest) => {
+          const header = req.headers.authorization;
+          const token = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : null;
+          const principal = token ? await auth.verify(token) : null;
+          return principal ? `u:${principal.username}` : `ip:${req.ip}`;
+        },
+      },
+    },
+  };
+  const readViewer = { ...viewer, ...readLimit };
+
+  // Answers that need a database scan are shared for 1 s between concurrent pollers. A trade written by THIS process
+  // drops them at once (`tradeWrites`); a write by another process is covered by the 1 s expiry. Wall clock on purpose:
+  // this is about request pressure, not the trading clock.
+  const SHARE_MS = 1000;
+  const shared = new Map<string, { at: number; writes: number; value: Promise<unknown> }>();
+  const sharedFor = <T>(key: string, build: () => Promise<T>): Promise<T> => {
+    const at = Date.now();
+    const writes = rt.repos.tradeWrites;
+    const hit = shared.get(key);
+    if (hit && hit.writes === writes && at - hit.at < SHARE_MS) return hit.value as Promise<T>;
+    const value = build();
+    shared.set(key, { at, writes, value });
+    if (shared.size > 64) shared.delete(shared.keys().next().value!);
+    value.catch(() => {
+      if (shared.get(key)?.value === value) shared.delete(key);
+    });
+    return value;
+  };
+
   const parse = <T extends z.ZodTypeAny>(schema: T, data: unknown, reply: FastifyReply): z.infer<T> | null => {
     const r = schema.safeParse(data ?? {});
     if (!r.success) {
@@ -103,49 +145,52 @@ export async function buildApi(rt: Runtime, auth = new AuthService(rt.cfg, rt.re
   });
 
   // ------------------------------------------------------------------ read (viewer+)
-  app.get('/api/auth/me', viewer, async (req) => ({ username: req.principal!.username, role: req.principal!.role }));
+  app.get('/api/auth/me', readViewer, async (req) => ({ username: req.principal!.username, role: req.principal!.role }));
 
-  app.get('/api/state', viewer, async () => ({ ...rt.bot.snapshot(), serverTime: Date.now() }));
+  app.get('/api/state', readViewer, async () => ({ ...rt.bot.snapshot(), serverTime: Date.now() }));
 
-  app.get('/api/settings', viewer, async () => ({ settings: rt.getSettings(), spec: rt.getSpec() }));
+  app.get('/api/settings', readViewer, async () => ({ settings: rt.getSettings(), spec: rt.getSpec() }));
 
-  app.get('/api/trades', viewer, async (req, reply) => {
+  app.get('/api/trades', readViewer, async (req, reply) => {
     const q = parse(z.object({ mode: z.enum(['demo', 'live']), limit: z.coerce.number().int().min(1).max(500).default(100), offset: z.coerce.number().int().min(0).default(0), all: z.coerce.boolean().default(false) }), req.query, reply);
     if (!q) return;
     const since = q.mode === 'demo' && !q.all && rt.demo.account ? rt.demo.account.epochStart : 0;
-    const rows = await rt.repos.listTrades(q.mode, { limit: q.limit, offset: q.offset, since });
+    const rows = await sharedFor(`trades|${q.mode}|${q.limit}|${q.offset}|${since}`, () => rt.repos.listTrades(q.mode, { limit: q.limit, offset: q.offset, since }));
     return { mode: q.mode, label: q.mode === 'demo' ? 'SIMULATED trades (virtual balance, paper fills)' : 'REAL exchange trades', trades: rows };
   });
 
-  app.get('/api/analytics', viewer, async (req, reply) => {
+  app.get('/api/analytics', readViewer, async (req, reply) => {
     const q = parse(z.object({ mode: z.enum(['demo', 'live']) }), req.query, reply);
     if (!q) return;
     const s = rt.getSettings();
     const since = q.mode === 'demo' ? rt.demo.account?.epochStart ?? 0 : 0;
-    const trades = await rt.repos.closedTrades(q.mode, since);
     const start = q.mode === 'demo' ? rt.demo.account?.startingBalanceUsd ?? s.demo.startingBalanceUsd : (rt.live.baselineEquityUsd ?? 0);
-    const m = computeMetrics(trades, start, s.execution.usdInrRate);
-    const curve = downsample(m.equityCurve, 400);
-    const equity = await rt.repos.equitySeries(q.mode, since, 1500);
-    return {
-      mode: q.mode,
-      label: q.mode === 'demo' ? 'SIMULATED (paper) results — virtual balance, simulated fills' : 'ACTUAL exchange results',
-      metrics: { ...m, equityCurve: curve },
-      drawdown: drawdownSeries(curve, m.startingBalance),
-      equitySnapshots: downsample(equity, 400),
-      recent: trades.slice(-200).map((t) => ({ id: t.id, side: t.side, entryTs: t.entryTs, exitTs: t.exitTs, netPnl: t.netPnl, fees: t.fees, entryFee: t.entryFee, exitFee: t.exitFee, exitFeeSaved: t.exitFeeSaved ?? 0, holdMs: t.holdMs, exitReason: t.exitReason, regime: t.regime, reachedTarget: t.reachedTarget })),
-    };
+    // the whole epoch is scanned and summarised: build it once per second however many tabs ask
+    return sharedFor(`analytics|${q.mode}|${since}|${start}|${s.execution.usdInrRate}`, async () => {
+      const trades = await rt.repos.closedTrades(q.mode, since);
+      const m = computeMetrics(trades, start, s.execution.usdInrRate);
+      const curve = downsample(m.equityCurve, 400);
+      const equity = await rt.repos.equitySeries(q.mode, since, 1500);
+      return {
+        mode: q.mode,
+        label: q.mode === 'demo' ? 'SIMULATED (paper) results — virtual balance, simulated fills' : 'ACTUAL exchange results',
+        metrics: { ...m, equityCurve: curve },
+        drawdown: drawdownSeries(curve, m.startingBalance),
+        equitySnapshots: downsample(equity, 400),
+        recent: trades.slice(-200).map((t) => ({ id: t.id, side: t.side, entryTs: t.entryTs, exitTs: t.exitTs, netPnl: t.netPnl, fees: t.fees, entryFee: t.entryFee, exitFee: t.exitFee, exitFeeSaved: t.exitFeeSaved ?? 0, holdMs: t.holdMs, exitReason: t.exitReason, regime: t.regime, reachedTarget: t.reachedTarget })),
+      };
+    });
   });
 
-  app.get('/api/backtests', viewer, async () => ({ runs: await rt.repos.listBacktests(20), dataSource: rt.cfg.MARKET_DATA_SOURCE }));
-  app.get('/api/backtests/:id', viewer, async (req, reply) => {
+  app.get('/api/backtests', readViewer, async () => ({ runs: await rt.repos.listBacktests(20), dataSource: rt.cfg.MARKET_DATA_SOURCE }));
+  app.get('/api/backtests/:id', readViewer, async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const run = await rt.repos.getBacktest(id);
     if (!run) return reply.code(404).send({ error: 'not_found' });
     return run;
   });
 
-  app.get('/api/credentials', viewer, async () => rt.creds.status());
+  app.get('/api/credentials', readViewer, async () => rt.creds.status());
 
   // ------------------------------------------------------------------ admin: bot control
   app.post('/api/bot/start', admin, async (req, reply) => {

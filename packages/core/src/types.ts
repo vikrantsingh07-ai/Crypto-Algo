@@ -16,7 +16,9 @@ export type ExitReason =
   | 'kill_switch'
   | 'mode_switch'
   | 'liquidation'
-  | 'reconcile';
+  | 'reconcile'
+  /** Backtest only: the position was still open when the data ran out and was closed at the last price. */
+  | 'end_of_data';
 
 export type MarketRegime = 'trend_up' | 'trend_down' | 'range' | 'high_volatility' | 'low_volatility';
 
@@ -102,7 +104,7 @@ export interface FeeBreakdown {
   total: number;
   rate: number;
   role: Role;
-  /** True when the Scalper Offer exit-fee waiver applied to this leg (fee charged = 0). */
+  /** True when the (dormant, off by default) Scalper Offer exit-fee waiver applied to this leg (fee charged = 0). */
   waived: boolean;
   /** Fee the waiver saved on this leg, USD (absent on rows stored before the waiver existed). */
   saved?: number;
@@ -158,7 +160,7 @@ export interface ClosedTrade {
   grossPnl: number;
   entryFee: number;
   exitFee: number;
-  /** Closing fee waived by the Scalper Offer on this trade, USD (0 / absent when the exit was charged). */
+  /** Closing fee waived by the dormant Scalper Offer on this trade, USD (0 / absent when the exit was charged, which is the default). */
   exitFeeSaved?: number;
   fees: number;
   slippageCost: number;

@@ -40,6 +40,7 @@ import {
   type WalletBalance,
 } from '@cryptoalgo/delta';
 import type { BotState, Repos, TradeRow } from '../repos';
+import { maxHoldMinutesOrNull } from './holdLimit';
 
 /**
  * LIVE executor: the ONLY component that sends orders to the exchange.
@@ -221,6 +222,12 @@ export class LiveExecutor {
     }
   }
 
+  /** Time-exit limit for an open position in ms, or null when positions have no time limit (never Infinity). */
+  private timeLimitMs(): number | null {
+    const ms = effectiveMaxHoldMs(this.d.getSettings(), this.waiverEffective());
+    return Number.isFinite(ms) ? ms : null;
+  }
+
   private feeOpts(): FeeConfigOptions {
     return { waiverOverride: this.waiverEffective() };
   }
@@ -270,7 +277,7 @@ export class LiveExecutor {
       lastCheck: this.waiver.lastCheck,
       windowMinutes: w.withinMinutes,
       safetyMarginSeconds: w.safetyMarginSeconds,
-      effectiveMaxHoldMinutes: effectiveMaxHoldMs(s, effective) / 60_000,
+      effectiveMaxHoldMinutes: maxHoldMinutesOrNull(s, effective),
       note: this.waiverNote(),
     };
   }
@@ -970,8 +977,8 @@ export class LiveExecutor {
     return this.run(async () => {
       const p = this.position;
       if (!p || p.closing) return;
-      const heldMs = this.d.now() - p.entryTs;
-      if (heldMs >= effectiveMaxHoldMs(this.d.getSettings(), this.waiverEffective())) await this.closeInner(p, 'time_exit');
+      const limit = this.timeLimitMs();
+      if (limit !== null && this.d.now() - p.entryTs >= limit) await this.closeInner(p, 'time_exit');
     });
   }
 
@@ -1001,9 +1008,11 @@ export class LiveExecutor {
         return;
       }
       const heldMs = now - p.entryTs;
-      // While the Scalper Offer waiver is effective the time exit fires `safetyMarginSeconds` before the window closes,
-      // so even the backstop exit is a free one. A failed close keeps being retried on every monitor tick.
-      if (heldMs >= effectiveMaxHoldMs(s, this.waiverEffective())) {
+      // No time limit (the default) means no time exit at all: only the target, the stop or an operator close ends the trade.
+      // With a limit set and the dormant Scalper Offer waiver effective the time exit fires `safetyMarginSeconds` before the
+      // window closes, so even the backstop exit is a free one. A failed close keeps being retried on every monitor tick.
+      const limit = this.timeLimitMs();
+      if (limit !== null && heldMs >= limit) {
         await this.closeInner(p, 'time_exit');
         return;
       }
