@@ -1,6 +1,6 @@
 # Demo → Live checklist
 
-Do not skip items. Tick each one. Nothing in this project has been run against the real Delta Exchange (its hosts were unreachable from the build sandbox), and no result on real market data exists in this repository. The operator will add an exchange API later and ask for the Live part then; until that point the system stays in Demo and none of sections B to D applies.
+Do not skip items. Tick each one. Nothing in this project has been run against the real Delta Exchange (its hosts were unreachable from the build sandbox), and the only real-market-data research (Binance spot candles as a stand-in, see [`RESEARCH_REAL_DATA.md`](RESEARCH_REAL_DATA.md)) found the default rules losing money in every out-of-sample month, so Live is not recommended on current evidence. The operator will add an exchange API later and ask for the Live part then; until that point the system stays in Demo and none of sections B to D applies.
 
 ## A. Before touching any exchange account
 - [ ] Demo has run for ≥ 1–2 weeks across different market conditions. Check trades/24 h, the stop/target mix, drawdown, and **how long trades stay open**: there is no time limit, so look at trades that ran for hours, the funding they paid or received, and how often a long trade blocked the single position slot.
