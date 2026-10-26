@@ -1,0 +1,22 @@
+[Unit]
+Description=Delta Exchange auto trader (DEMO)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/delta-auto-trader
+EnvironmentFile=/opt/delta-auto-trader/.env
+ExecStart=/opt/delta-auto-trader/.venv/bin/python main.py run
+Restart=always
+RestartSec=10
+# SIGTERM -> graceful stop (open positions keep their exchange-side stop/take-profit)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/delta-auto-trader/data /opt/delta-auto-trader/logs
+
+[Install]
+WantedBy=multi-user.target
