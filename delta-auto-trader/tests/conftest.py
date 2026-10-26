@@ -25,7 +25,7 @@ BTC_PRODUCT = {
 
 def make_env(tmp_path, **over):
     env = {"TRADING_MODE": "PAPER", "DATA_DIR": str(tmp_path / "data"), "LOG_DIR": str(tmp_path / "logs"),
-           "COOLDOWN_MINUTES": "0", "LOOP_INTERVAL_SECONDS": "1"}
+           "COOLDOWN_MINUTES": "0", "WATCHLIST": "BTC", "LOOP_INTERVAL_SECONDS": "1"}
     env.update({k: str(v) for k, v in over.items()})
     return env
 

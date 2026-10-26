@@ -20,7 +20,7 @@ separate gates are opened. **No profitability is claimed or implied.**
 (0.001 BTC) is ≈ $100 (₹8,800+). With `MAX_POSITION_NOTIONAL_INR=10` / `MAX_RISK_PER_TRADE_INR=2` the bot will
 detect signals and print `[SKIP] Reason: Minimum order size exceeds configured limit…` — by design: it never
 raises size or risk to meet exchange minimums. To exercise the order path on the *demo* account, raise the
-limits in `.env` (e.g. `MAX_POSITION_NOTIONAL_INR=20000`, `MAX_RISK_PER_TRADE_INR=100`); demo funds are virtual.
+limits in `.env` (e.g. `MAX_POSITION_NOTIONAL_INR=5000`, `MAX_RISK_PER_TRADE_INR=100`); demo funds are virtual.
 `python main.py check` prints the exact INR cost of one contract against your limit.
 
 ## Install

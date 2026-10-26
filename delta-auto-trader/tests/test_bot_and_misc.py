@@ -258,3 +258,40 @@ def test_backtest_with_default_inr_limits_trades_nothing(cfg, inst):
           for c in synth_candles(1500, seed=5)]
     res = run_backtest(cfg, EmaCrossStrategy(cfg), inst, cs, FeeSchedule.resolve(cfg, inst))
     assert res.stats()["trades"] == 0 and res.skipped
+
+
+# ----------------------------------------------------------------- XRP / DOGE
+XRP_PRODUCT = dict(BTC_PRODUCT, id=101, symbol="XRPUSD", contract_value="1", tick_size="0.0001",
+                   underlying_asset={"symbol": "XRP"})
+DOGE_PRODUCT = dict(BTC_PRODUCT, id=102, symbol="DOGEUSD", contract_value="10", tick_size="0.00001",
+                    underlying_asset={"symbol": "DOGE"})
+
+
+def test_default_watchlist_is_xrp_doge_and_selected(make_cfg):
+    from config import load_config
+    assert load_config(env={}).watchlist == ["XRP", "DOGE"]
+    cfg = make_cfg(WATCHLIST="XRP,DOGE")
+    insts = discover([BTC_PRODUCT, XRP_PRODUCT, DOGE_PRODUCT])
+    sel = InstrumentSelector(cfg)
+    assert sel.select(insts, "LONG", {}, bases=["DOGE"]).instrument.symbol == "DOGEUSD"
+    assert sel.select(insts, "LONG", {}).instrument.symbol == "XRPUSD"
+
+
+@pytest.mark.parametrize("prod,price,stop", [(XRP_PRODUCT, 2.5, 0.05), (DOGE_PRODUCT, 0.25, 0.004)])
+def test_sizing_and_price_formatting_for_low_priced_coins(make_cfg, prod, price, stop):
+    from order_manager import fmt
+    from position_sizer import size_position
+    cfg = make_cfg(MAX_POSITION_NOTIONAL_INR=20000, MAX_RISK_PER_TRADE_INR=100)
+    inst = parse_product(prod)
+    p = size_position(cfg, inst, "LONG", price, stop, FeeSchedule.resolve(cfg, inst), 1000)
+    assert p.ok and p.qty >= 1 and p.stop < p.entry < p.take_profit
+    assert p.notional <= cfg.max_position_notional_usd and p.econ.net_loss <= cfg.max_risk_usd + 1e-9
+    assert abs(float(fmt(p.stop, inst.tick_size)) - p.stop) < inst.tick_size / 2
+    assert len(fmt(p.take_profit, inst.tick_size).split(".")[1]) == (4 if prod is XRP_PRODUCT else 5)
+
+
+def test_default_inr_limits_explain_skip_for_xrp(cfg):
+    from position_sizer import size_position
+    inst = parse_product(XRP_PRODUCT)
+    p = size_position(cfg, inst, "LONG", 2.5, 0.05, FeeSchedule.resolve(cfg, inst), 1000)
+    assert not p.ok and "Minimum order size" in p.reason

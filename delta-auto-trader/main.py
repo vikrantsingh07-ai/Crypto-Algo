@@ -424,10 +424,10 @@ def cmd_backtest(cfg, args):
     except ExchangeError as e:
         if not args.csv:
             raise
-        print(f"[WARN] product spec unavailable ({e}); using ASSUMED contract spec for offline CSV backtest")
+        print(f"[WARN] product spec unavailable ({e}); using ASSUMED spec (contract_value/tick via --contract-value/--tick-size) for offline CSV backtest")
         inst = parse_product({"id": 0, "symbol": sym, "contract_type": "perpetual_futures",
-                              "contract_value": "0.001" if sym.startswith("BTC") else "0.01",
-                              "tick_size": "0.5" if sym.startswith("BTC") else "0.05", "state": "live",
+                              "contract_value": args.contract_value or "1",
+                              "tick_size": args.tick_size or "0.0001", "state": "live",
                               "initial_margin": "1", "underlying_asset": {"symbol": sym[:-3]}})
     if args.csv:
         candles = load_csv(args.csv)
@@ -486,6 +486,7 @@ def main(argv=None):
     p.add_argument("--csv"); p.add_argument("--symbol"); p.add_argument("--days", type=int, default=30)
     p.add_argument("--notional-inr", type=float); p.add_argument("--risk-inr", type=float)
     p.add_argument("--max-daily-loss-inr", type=float)
+    p.add_argument("--contract-value"); p.add_argument("--tick-size")
     p.add_argument("--i-understand-demo", action="store_true")
     args = p.parse_args(argv)
     try:

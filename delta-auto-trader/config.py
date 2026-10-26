@@ -73,7 +73,7 @@ class Config:
     api_secret: str = field(default="", repr=False)
 
     preferred_direction: str = "LONG"
-    watchlist: List[str] = field(default_factory=lambda: ["BTC", "ETH"])
+    watchlist: List[str] = field(default_factory=lambda: ["XRP", "DOGE"])
     market_type: str = "PERPETUAL"
     explicit_symbols: List[str] = field(default_factory=list)
     allow_other_contracts: bool = False
@@ -227,7 +227,7 @@ def load_config(env: Optional[dict] = None, dotenv_path: Optional[str] = None) -
         api_key=_s(env, prefix + "API_KEY"),
         api_secret=_s(env, prefix + "API_SECRET"),
         preferred_direction=_s(env, "INITIAL_PREFERRED_DIRECTION", "LONG").upper(),
-        watchlist=[x.strip().upper() for x in _s(env, "WATCHLIST", "BTC,ETH").split(",") if x.strip()],
+        watchlist=[x.strip().upper() for x in _s(env, "WATCHLIST", "XRP,DOGE").split(",") if x.strip()],
         market_type=_s(env, "MARKET_TYPE", "PERPETUAL").upper(),
         explicit_symbols=[x.strip().upper() for x in _s(env, "EXPLICIT_SYMBOLS").split(",") if x.strip()],
         allow_other_contracts=_b(env.get("ALLOW_OTHER_CONTRACTS"), False),
