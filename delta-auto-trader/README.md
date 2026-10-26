@@ -129,3 +129,10 @@ journalctl -u delta-auto-trader -f        # live output;   sudo systemctl stop d
 * Funding and option fees are estimates. Backtests use candle data only (intra-candle order unknown → stop assumed first), so they are optimistic/approximate.
 * The WebSocket feed (`WsFeed`) is implemented and tested for reconnect/backoff but the loop currently uses REST polling for decisions; a stale WS never blocks trading because REST is authoritative.
 * Paper-mode state is not persisted across restarts.
+
+## Running from a phone (Android / Termux) and sharing a report
+
+iPhone cannot run this directly; use a small cloud server instead. On Android: install **Termux from F-Droid** (not the Play Store build), then
+`pkg install git && git clone <repo> && cd Crypto-Algo/delta-auto-trader && bash deploy/termux_setup.sh`, edit `.env` (`nano .env`), run `python main.py check`.
+Keep it alive with `termux-wake-lock`, disable battery optimisation for Termux, and run in `tmux`. Caveats: Delta trading keys require a **whitelisted IP** and mobile data/Wi-Fi IPs change, so a phone is fine for testing but poor for 24/7 — use a VPS with a static IPv4 for real running.
+To have someone review a run: `python main.py report` prints config (no secrets), connectivity check, status, trades and the last log lines, with keys redacted. Never paste your `.env`.

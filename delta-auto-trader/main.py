@@ -391,6 +391,30 @@ def cmd_trades(cfg):
     print(f"TOTAL net P&L (shown trades): {tot:.4f} USD = {tot * cfg.usd_inr_rate:.2f} INR")
 
 
+def cmd_report(cfg):
+    """Redacted diagnostics to paste back for review: no keys, no secrets."""
+    import json
+    from logger import RedactingFilter
+    print("=== CONFIG (secrets omitted) ===")
+    print(json.dumps(cfg.safe_summary(), indent=1, default=str))
+    print("=== CHECK ===")
+    rc = cmd_check(cfg)
+    print(f"check exit code: {rc}")
+    print("=== STATUS ===")
+    cmd_status(cfg)
+    print("=== TRADES ===")
+    cmd_trades(cfg)
+    print("=== LAST LOG LINES ===")
+    path = os.path.join(cfg.log_dir, "bot.log")
+    if os.path.exists(path):
+        import logging
+        flt = RedactingFilter()
+        for line in open(path, errors="replace").read().splitlines()[-40:]:
+            rec = logging.LogRecord("r", logging.INFO, "", 0, line, (), None)
+            flt.filter(rec)
+            print(rec.msg)
+
+
 def cmd_emergency(cfg):
     os.makedirs(cfg.data_dir, exist_ok=True)
     with open(cfg.emergency_file, "w") as f:
@@ -481,7 +505,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Delta Exchange autonomous trading bot (demo-first)")
     p.add_argument("command", nargs="?", default="run",
                    choices=["run", "check", "discover", "status", "trades", "emergency-stop", "clear-halt",
-                            "backtest", "demo-smoke"])
+                            "backtest", "demo-smoke", "report"])
     p.add_argument("--env-file")
     p.add_argument("--csv"); p.add_argument("--symbol"); p.add_argument("--days", type=int, default=30)
     p.add_argument("--notional-inr", type=float); p.add_argument("--risk-inr", type=float)
@@ -491,7 +515,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     try:
         cfg = load_config(dotenv_path=args.env_file)
-        cfg.validate(need_credentials=args.command in ("run", "check", "demo-smoke")
+        cfg.validate(need_credentials=args.command in ("run", "check", "demo-smoke", "report")
                      and cfg.trading_mode != "PAPER")
     except ConfigError as e:
         print(f"[ERROR] Configuration: {e}")
@@ -514,6 +538,8 @@ def main(argv=None):
         cmd_backtest(cfg, args)
     elif args.command == "demo-smoke":
         return cmd_demo_smoke(cfg, args)
+    elif args.command == "report":
+        cmd_report(cfg)
     return 0
 
 
